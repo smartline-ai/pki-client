@@ -76,6 +76,26 @@ func (ca testCA) leafFor(t *testing.T, pub *ecdsa.PublicKey, notAfter time.Time)
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
+// clientLeafFor выпускает лист с ExtKeyUsage только clientAuth — форма, в
+// которой Control Plane реально выдаёт вид client (control-plane/internal/pki
+// .SignLeaf), в отличие от leaf()/leafFor() выше, которые несут serverAuth.
+func (ca testCA) clientLeafFor(t *testing.T, pub *ecdsa.PublicKey, notAfter time.Time) []byte {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(4),
+		Subject:      pkix.Name{CommonName: "ops-laptop"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     notAfter,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
+	if err != nil {
+		t.Fatalf("клиентский лист: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
 func (ca testCA) pool(t *testing.T) *x509.CertPool {
 	t.Helper()
 	p := x509.NewCertPool()
@@ -112,7 +132,7 @@ func TestInspectClassifies(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, _, _ := Inspect(c.path, ours.pool(t), now)
+			got, _, _ := Inspect(c.path, ours.pool(t), KindNode, now)
 			if got != c.want {
 				t.Fatalf("Inspect = %q, ожидалось %q", got, c.want)
 			}
@@ -133,7 +153,7 @@ func TestInspectDistinguishesUnreadableFromAbsent(t *testing.T) {
 		t.Fatalf("каталог вместо файла сертификата: %v", err)
 	}
 
-	state, cert, err := Inspect(certPath, ours.pool(t), time.Now())
+	state, cert, err := Inspect(certPath, ours.pool(t), KindNode, time.Now())
 	if state != CertUnreadable {
 		t.Fatalf("Inspect = %q, ожидалось %q", state, CertUnreadable)
 	}

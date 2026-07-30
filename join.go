@@ -193,7 +193,7 @@ func postJoin(ctx context.Context, hc *http.Client, url string, body []byte) (*j
 
 // installCert проверяет выданный сертификат до того, как он ляжет на диск.
 func installCert(p Params, key *ecdsa.PrivateKey, resp *joinResponse, log *slog.Logger) error {
-	cert, err := verifyIssuedCert(resp.CertPEM, key, p.Roots)
+	cert, err := verifyIssuedCert(resp.CertPEM, key, p.Roots, p.Identity.Kind)
 	if err != nil {
 		return fmt.Errorf("pkiclient: %w", err)
 	}
@@ -221,7 +221,13 @@ func installCert(p Params, key *ecdsa.PrivateKey, resp *joinResponse, log *slog.
 // Проверок две, и обе обязательны: цепочка к прижатому CA — против
 // подменённого Control Plane, совпадение публичного ключа — против
 // сертификата, к которому у нас нет приватного ключа.
-func verifyIssuedCert(certPEM string, key *ecdsa.PrivateKey, roots *x509.CertPool) (*x509.Certificate, error) {
+//
+// kind выбирает ожидаемый EKU через expectedKeyUsage (certstate.go): Control
+// Plane выдаёт клиентский лист с одним лишь clientAuth (никогда serverAuth),
+// и до этого параметра здесь безусловно требовался serverAuth — сам join
+// клиента отваливался бы на собственной проверке присланного сертификата,
+// ни разу не поставив сертификат под сомнение по существу.
+func verifyIssuedCert(certPEM string, key *ecdsa.PrivateKey, roots *x509.CertPool, kind Kind) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil || block.Type != "CERTIFICATE" {
 		return nil, fmt.Errorf("cert_pem не разбирается")
@@ -232,7 +238,7 @@ func verifyIssuedCert(certPEM string, key *ecdsa.PrivateKey, roots *x509.CertPoo
 	}
 	if _, err := cert.Verify(x509.VerifyOptions{
 		Roots:     roots,
-		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsages: []x509.ExtKeyUsage{expectedKeyUsage(kind)},
 	}); err != nil {
 		return nil, fmt.Errorf("выданный сертификат не собирается в цепочку к прижатому CA: %w", err)
 	}

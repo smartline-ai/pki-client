@@ -75,7 +75,7 @@ func Ensure(ctx context.Context, d Deps) error {
 		}, d.Log)
 	}
 
-	state, cert, inspectErr := Inspect(d.CertFile, roots, d.Now())
+	state, cert, inspectErr := Inspect(d.CertFile, roots, d.Identity.Kind, d.Now())
 	token, tokenErr := readToken(d.JoinTokenFile)
 
 	if state == CertValid {

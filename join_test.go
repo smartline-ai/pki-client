@@ -85,7 +85,7 @@ func TestJoinWritesCertificateAndDeletesToken(t *testing.T) {
 		t.Fatalf("Join: %v", err)
 	}
 
-	state, _, _ := Inspect(p.CertPath, ca.pool(t), time.Now())
+	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindNode, time.Now())
 	if state != CertValid {
 		t.Fatalf("после join сертификат в состоянии %q", state)
 	}
@@ -204,6 +204,77 @@ func TestBuildCSRPerKind(t *testing.T) {
 				t.Fatalf("IPAddresses = %v, client не имеет права нести SAN IP", csr.IPAddresses)
 			}
 		})
+	}
+}
+
+// Плана 03, задача 3, шаг 0 (блокирующая предпосылка): Control Plane выдаёт
+// клиентский лист только с clientAuth (control-plane/internal/pki.SignLeaf),
+// а verifyIssuedCert до этого теста требовал serverAuth безусловно — реальный
+// join вида client отваливался бы на проверке собственной же стороны, ни
+// разу не дойдя до вопроса, кому в действительности доверять.
+func TestJoinAcceptsClientAuthOnlyLeafForClientKind(t *testing.T) {
+	ca := makeCA(t)
+	dir := t.TempDir()
+	p := Params{
+		Token:    "тестовый-токен",
+		Identity: Identity{Kind: KindClient, CN: "ops-laptop"},
+		CertPath: filepath.Join(dir, "client.pem"),
+		KeyPath:  filepath.Join(dir, "client-key.pem"),
+		CAPEM:    ca.pem,
+		Roots:    ca.pool(t),
+	}
+	key, err := LoadOrCreateKey(p.KeyPath)
+	if err != nil {
+		t.Fatalf("ключ: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaf := ca.clientLeafFor(t, &key.PublicKey, time.Now().Add(time.Hour))
+		json.NewEncoder(w).Encode(map[string]string{
+			"cert_pem": string(leaf), "ca_pem": string(ca.pem),
+		})
+	}))
+	defer srv.Close()
+	p.URL = srv.URL
+
+	if err := Join(context.Background(), p, discardLog()); err != nil {
+		t.Fatalf("Join вида client с clientAuth-only листом обязан пройти: %v", err)
+	}
+
+	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindClient, time.Now())
+	if state != CertValid {
+		t.Fatalf("Inspect(kind=client) = %q, ожидалось %q", state, CertValid)
+	}
+}
+
+// Тот же фикс не имеет права сломать node: лист node/service несёт оба EKU
+// (serverAuth+clientAuth), и join обязан по-прежнему проходить проверку на
+// serverAuth.
+func TestJoinStillAcceptsNodeLeaf(t *testing.T) {
+	ca := makeCA(t)
+	dir := t.TempDir()
+	p := joinParams(t, ca, "", dir)
+	key, err := LoadOrCreateKey(p.KeyPath)
+	if err != nil {
+		t.Fatalf("ключ: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaf := ca.leafFor(t, &key.PublicKey, time.Now().Add(time.Hour))
+		json.NewEncoder(w).Encode(map[string]string{
+			"cert_pem": string(leaf), "ca_pem": string(ca.pem),
+		})
+	}))
+	defer srv.Close()
+	p.URL = srv.URL
+
+	if err := Join(context.Background(), p, discardLog()); err != nil {
+		t.Fatalf("Join вида node обязан пройти: %v", err)
+	}
+
+	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindNode, time.Now())
+	if state != CertValid {
+		t.Fatalf("Inspect(kind=node) = %q, ожидалось %q", state, CertValid)
 	}
 }
 

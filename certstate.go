@@ -37,6 +37,22 @@ func LoadRoots(caPath string) (*x509.CertPool, []byte, error) {
 	return pool, caPEM, nil
 }
 
+// expectedKeyUsage — EKU, которого вправе требовать сам обладатель листа при
+// проверке собственного сертификата. Зеркалит выбор
+// control-plane/internal/pki.SignLeaf: node и service получают лист с обоими
+// EKU (serverAuth+clientAuth) и здесь проверяются на serverAuth — этого
+// достаточно, Verify принимает любое совпадение из списка, — а client
+// получает лист только с clientAuth и обязан проверяться на него же.
+// Раньше здесь была одна и та же константа ServerAuth для всех видов, и
+// клиентский лист, не имеющий serverAuth вовсе, не проходил проверку
+// собственной же стороны, ни разу не дойдя до Control Plane.
+func expectedKeyUsage(kind Kind) x509.ExtKeyUsage {
+	if kind == KindClient {
+		return x509.ExtKeyUsageClientAuth
+	}
+	return x509.ExtKeyUsageServerAuth
+}
+
 // Inspect классифицирует сертификат. Порядок проверок важен: просроченный
 // сертификат от своего CA и валидный от чужого — разные истории, и в журнале
 // они обязаны выглядеть по-разному, иначе диагностика упирается в "TLS не
@@ -49,7 +65,11 @@ func LoadRoots(caPath string) (*x509.CertPool, []byte, error) {
 // удостоверение, и вызывающий обязан отказаться сам, а не тихо решить, что
 // join безопасен. Третий элемент возврата ненулевой только для
 // CertUnreadable и несёт исходную ошибку чтения.
-func Inspect(certPath string, roots *x509.CertPool, now time.Time) (CertState, *x509.Certificate, error) {
+//
+// kind выбирает ожидаемый EKU (expectedKeyUsage) — клиентский лист несёт
+// только clientAuth и не пройдёт проверку на serverAuth, которую до этого
+// параметра функция требовала безусловно.
+func Inspect(certPath string, roots *x509.CertPool, kind Kind, now time.Time) (CertState, *x509.Certificate, error) {
 	raw, err := os.ReadFile(certPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -71,7 +91,7 @@ func Inspect(certPath string, roots *x509.CertPool, now time.Time) (CertState, *
 	if _, err := cert.Verify(x509.VerifyOptions{
 		Roots:       roots,
 		CurrentTime: now,
-		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsages:   []x509.ExtKeyUsage{expectedKeyUsage(kind)},
 	}); err != nil {
 		return CertForeignCA, cert, nil
 	}

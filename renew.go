@@ -165,7 +165,7 @@ func renewOnce(ctx context.Context, d Deps, src *CertSource) error {
 	// расколотой пары. Обе проверки — до записи на диск: иначе окно между
 	// WriteFileAtomic и src.Load могло разойтись с диском на сертификате,
 	// для которого ключа нет вообще.
-	cert, err := verifyIssuedCert(out.CertPEM, key, roots)
+	cert, err := verifyIssuedCert(out.CertPEM, key, roots, d.Identity.Kind)
 	if err != nil {
 		return fmt.Errorf("pkiclient: обновлённый сертификат не прошёл проверку: %w", err)
 	}
