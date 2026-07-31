@@ -44,11 +44,11 @@ func ensureDeps(t *testing.T, dir, mode string) Deps {
 func TestEnsureSkipsInWebhookMode(t *testing.T) {
 	dir := t.TempDir()
 	d := ensureDeps(t, dir, "webhook")
-	// Ни CA, ни сертификата, ни токена — и всё равно никакой ошибки:
-	// в режиме webhook join пропускается целиком (§3.2 контракта), и
-	// работающий участник на dev-1 обязан пережить выкатку этого кода.
+	// No CA, no certificate, no token — and still no error at all: in webhook
+	// mode join is skipped entirely (§3.2 of the contract), and a running
+	// participant on dev-1 has to survive a rollout of this code.
 	if err := Ensure(context.Background(), d); err != nil {
-		t.Fatalf("в режиме webhook Ensure обязан быть no-op, получено: %v", err)
+		t.Fatalf("in webhook mode Ensure has to be a no-op, got: %v", err)
 	}
 }
 
@@ -57,7 +57,7 @@ func TestEnsureRequiresCAAlways(t *testing.T) {
 	d := ensureDeps(t, dir, "control_plane")
 	err := Ensure(context.Background(), d)
 	if err == nil || !strings.Contains(err.Error(), "ca.pem") {
-		t.Fatalf("отсутствие прижатого CA обязано валить старт с упоминанием файла, получено: %v", err)
+		t.Fatalf("a missing pinned CA has to fail the start and name the file, got: %v", err)
 	}
 }
 
@@ -66,35 +66,37 @@ func TestEnsureSkipsWhenCertificateValid(t *testing.T) {
 	dir := t.TempDir()
 	d := ensureDeps(t, dir, "control_plane")
 	writeFile(t, d.CAFile, ca.pem)
-	// Ключ — полноправная половина идентичности: без него один сертификат не
-	// повод пропускать join (см. TestEnsureRejoinsWhenValidCertificateHasNoKey).
-	// Ключ создаётся ДО сертификата и сертификат подписывается именно на его
-	// публичную часть (leafFor, а не leaf) — иначе пара на диске расколота по
-	// построению теста, и с введённой проверкой (C2) Ensure законно уходит в
-	// join вместо пропуска, чего этот тест как раз не хочет проверять.
+	// The key is a full half of the identity: without it a certificate alone
+	// is no reason to skip a join (see TestEnsureRejoinsWhenValidCertificateHasNoKey).
+	// The key is created BEFORE the certificate and the certificate is signed
+	// for exactly its public half (leafFor, not leaf) — otherwise the pair on
+	// disk is split by the test's own construction, and with the check that
+	// was introduced (C2) Ensure legitimately goes for a join instead of
+	// skipping, which is not what this test wants to check.
 	key, err := LoadOrCreateKey(d.KeyFile)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 	writeFile(t, d.CertFile, ca.leafFor(t, &key.PublicKey, time.Now().Add(time.Hour)))
-	// Токен лежит рядом и обязан ПЕРЕЖИТЬ вызов: молча уничтожать
-	// удостоверение, положенное для планового повторного присоединения, хуже,
-	// чем оставить его.
-	writeFile(t, d.JoinTokenFile, []byte("не-трогать"))
+	// The token lies next to it and has to SURVIVE the call: silently
+	// destroying credentials placed there for a planned re-join is worse than
+	// leaving them alone.
+	writeFile(t, d.JoinTokenFile, []byte("do-not-touch"))
 
 	if err := Ensure(context.Background(), d); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	if _, err := os.Stat(d.JoinTokenFile); err != nil {
-		t.Fatal("токен рядом с валидным сертификатом не имеет права быть удалённым")
+		t.Fatal("a token next to a valid certificate has no business being deleted")
 	}
 }
 
-// Сертификат валиден сам по себе, но без ключа он не идентичность: TLS не
-// поднимется без приватного ключа. Раз есть чем присоединиться (токен на
-// месте), Ensure обязан заметить расколотую пару и присоединиться заново,
-// вместо того чтобы принять один валидный на вид файл за готовую идентичность
-// и молча разрешить запуск — именно так воспроизводился баг из ревью.
+// The certificate is valid on its own, but without a key it is not an
+// identity: TLS will not come up without a private key. Since there is
+// something to join with (the token is in place), Ensure has to notice the
+// split pair and join again instead of taking one valid-looking file for a
+// complete identity and quietly allowing the start — that is exactly how the
+// bug from the review reproduced.
 func TestEnsureRejoinsWhenValidCertificateHasNoKey(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
@@ -102,36 +104,37 @@ func TestEnsureRejoinsWhenValidCertificateHasNoKey(t *testing.T) {
 	writeFile(t, d.CAFile, ca.pem)
 	staleCert := ca.leaf(t, time.Now().Add(time.Hour))
 	writeFile(t, d.CertFile, staleCert)
-	// Ключ умышленно не создан: сертификат есть, ключа к нему нет.
-	writeFile(t, d.JoinTokenFile, []byte("тестовый-токен"))
+	// The key is deliberately not created: there is a certificate and no key
+	// for it.
+	writeFile(t, d.JoinTokenFile, []byte("test-token"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("тело запроса не разбирается: %v", err)
+			t.Errorf("the request body does not parse: %v", err)
 			return
 		}
 		csrPEM, _ := req["csr_pem"].(string)
 		block, _ := pem.Decode([]byte(csrPEM))
 		if block == nil {
-			t.Errorf("csr_pem не PEM")
+			t.Errorf("csr_pem is not PEM")
 			return
 		}
 		csr, err := x509.ParseCertificateRequest(block.Bytes)
 		if err != nil {
-			t.Errorf("csr_pem не разбирается: %v", err)
+			t.Errorf("csr_pem does not parse: %v", err)
 			return
 		}
 		pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
 		if !ok {
-			t.Errorf("CSR не на EC-ключе")
+			t.Errorf("the CSR is not on an EC key")
 			return
 		}
 		leaf := ca.leafFor(t, pub, time.Now().Add(time.Hour))
 		if err := json.NewEncoder(w).Encode(map[string]string{
 			"cert_pem": string(leaf), "ca_pem": string(ca.pem),
 		}); err != nil {
-			t.Errorf("ответ join не пишется: %v", err)
+			t.Errorf("the join response does not write: %v", err)
 		}
 	}))
 	defer srv.Close()
@@ -141,30 +144,30 @@ func TestEnsureRejoinsWhenValidCertificateHasNoKey(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 	if _, err := os.Stat(d.KeyFile); err != nil {
-		t.Fatal("отсутствовавший ключ обязан быть создан присоединением заново")
+		t.Fatal("the missing key has to be created by joining again")
 	}
 	newCert, err := os.ReadFile(d.CertFile)
 	if err != nil {
-		t.Fatalf("чтение нового сертификата: %v", err)
+		t.Fatalf("reading the new certificate: %v", err)
 	}
 	if string(newCert) == string(staleCert) {
-		t.Fatal("осиротевший сертификат обязан быть перезаписан новым, согласованным с ключом")
+		t.Fatal("the orphaned certificate has to be overwritten by a new one consistent with the key")
 	}
 	if _, err := os.Stat(d.JoinTokenFile); !os.IsNotExist(err) {
-		t.Fatal("токен обязан быть удалён после успешного присоединения заново")
+		t.Fatal("the token has to be deleted after a successful re-join")
 	}
 }
 
-// Прямая репродукция C2 финального ревью: сертификат валиден сам по себе, а
-// на диске лежит ключ, который ему не принадлежит (например — join когда-то
-// упал между записью нового ключа и получением нового сертификата, оставив
-// старый сертификат рядом с новым ключом). Раньше эту пару пропускал
-// os.Stat, потому что оба файла существовали; демон стартовал бы дальше и
-// падал уже на tls.LoadX509KeyPair у вызывающего, без единого шанса на join,
-// даже со свежим токеном рядом. Ensure обязан заметить несовпадение и
-// присоединиться заново, переиспользуя лежащий на диске ключ (а не отбрасывая
-// его) — именно так, как это делает путь повтора §6.1.1: Join увидит
-// существующий файл ключа и подпишет CSR им же.
+// A direct reproduction of C2 of the final review: the certificate is valid on
+// its own, and the key on disk is not the one it belongs to (for example — a
+// join once died between writing the new key and receiving the new
+// certificate, leaving the old certificate next to the new key). os.Stat used
+// to let that pair through because both files existed; the daemon would start
+// on and fail at tls.LoadX509KeyPair in the caller, without a single chance at
+// a join, even with a fresh token sitting right there. Ensure has to notice
+// the mismatch and join again, reusing the key that lies on disk (rather than
+// discarding it) — exactly the way the retry path in §6.1.1 does it: Join sees
+// the existing key file and signs the CSR with it.
 func TestEnsureRejoinsWhenCertificateAndKeyAreMismatched(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
@@ -172,45 +175,46 @@ func TestEnsureRejoinsWhenCertificateAndKeyAreMismatched(t *testing.T) {
 	writeFile(t, d.CAFile, ca.pem)
 	staleCert := ca.leaf(t, time.Now().Add(time.Hour))
 	writeFile(t, d.CertFile, staleCert)
-	// Ключ на диске реален и читаем, но подписан не для этого сертификата.
+	// The key on disk is real and readable, but it is not what this
+	// certificate was signed for.
 	mismatchedKey, err := LoadOrCreateKey(d.KeyFile)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
-	writeFile(t, d.JoinTokenFile, []byte("тестовый-токен"))
+	writeFile(t, d.JoinTokenFile, []byte("test-token"))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("тело запроса не разбирается: %v", err)
+			t.Errorf("the request body does not parse: %v", err)
 			return
 		}
 		csrPEM, _ := req["csr_pem"].(string)
 		block, _ := pem.Decode([]byte(csrPEM))
 		if block == nil {
-			t.Errorf("csr_pem не PEM")
+			t.Errorf("csr_pem is not PEM")
 			return
 		}
 		csr, err := x509.ParseCertificateRequest(block.Bytes)
 		if err != nil {
-			t.Errorf("csr_pem не разбирается: %v", err)
+			t.Errorf("csr_pem does not parse: %v", err)
 			return
 		}
 		pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
 		if !ok {
-			t.Errorf("CSR не на EC-ключе")
+			t.Errorf("the CSR is not on an EC key")
 			return
 		}
-		// Подтверждаем, что CSR несёт ключ, УЖЕ лежавший на диске, а не
-		// какой-то новый: путь повтора обязан переиспользовать его.
+		// Confirm that the CSR carries the key that was ALREADY on disk rather
+		// than some new one: the retry path has to reuse it.
 		if !pub.Equal(&mismatchedKey.PublicKey) {
-			t.Errorf("CSR подписан не тем ключом, что уже лежал на диске")
+			t.Errorf("the CSR was signed with a different key than the one already on disk")
 		}
 		leaf := ca.leafFor(t, pub, time.Now().Add(time.Hour))
 		if err := json.NewEncoder(w).Encode(map[string]string{
 			"cert_pem": string(leaf), "ca_pem": string(ca.pem),
 		}); err != nil {
-			t.Errorf("ответ join не пишется: %v", err)
+			t.Errorf("the join response does not write: %v", err)
 		}
 	}))
 	defer srv.Close()
@@ -221,57 +225,59 @@ func TestEnsureRejoinsWhenCertificateAndKeyAreMismatched(t *testing.T) {
 	}
 	newCert, err := os.ReadFile(d.CertFile)
 	if err != nil {
-		t.Fatalf("чтение нового сертификата: %v", err)
+		t.Fatalf("reading the new certificate: %v", err)
 	}
 	if string(newCert) == string(staleCert) {
-		t.Fatal("расколотая пара обязана быть исправлена новым сертификатом")
+		t.Fatal("the split pair has to be repaired with a new certificate")
 	}
-	// Ключ на диске не должен был замениться: LoadOrCreateKey не трогает
-	// существующий файл, и пара чинится со стороны сертификата.
+	// The key on disk should not have been replaced: LoadOrCreateKey does not
+	// touch an existing file, and the pair is repaired from the certificate
+	// side.
 	keyOnDisk, err := os.ReadFile(d.KeyFile)
 	if err != nil {
-		t.Fatalf("чтение ключа: %v", err)
+		t.Fatalf("reading the key: %v", err)
 	}
 	stillSameKey, err := parseECKey(d.KeyFile, keyOnDisk)
 	if err != nil {
-		t.Fatalf("разбор ключа: %v", err)
+		t.Fatalf("parsing the key: %v", err)
 	}
 	if !stillSameKey.PublicKey.Equal(&mismatchedKey.PublicKey) {
-		t.Fatal("ключ на диске обязан остаться тем же самым — исправляется только сертификат")
+		t.Fatal("the key on disk has to stay the very same one — only the certificate is repaired")
 	}
 	if _, err := os.Stat(d.JoinTokenFile); !os.IsNotExist(err) {
-		t.Fatal("токен обязан быть удалён после успешного присоединения заново")
+		t.Fatal("the token has to be deleted after a successful re-join")
 	}
-	// И главное — итоговая пара обязана реально совпадать: это тот факт,
-	// который раньше проверял только os.Stat, и который прежде принял бы
-	// эту самую комбинацию файлов как валидную идентичность.
+	// And the main thing — the resulting pair has to actually match: that is
+	// the fact only os.Stat used to check, and which would previously have
+	// accepted this very combination of files as a valid identity.
 	if _, err := tls.LoadX509KeyPair(d.CertFile, d.KeyFile); err != nil {
-		t.Fatalf("итоговая пара не сходится: %v", err)
+		t.Fatalf("the resulting pair does not match: %v", err)
 	}
 }
 
-// Тот же расколотый случай (сертификат валиден, ключа нет), но без токена
-// присоединиться заново нечем — Ensure обязан отказаться внятно, и сообщение
-// обязано назвать именно отсутствующий файл (ключ), а не рассуждать про
-// сертификат, который на самом деле на месте. Ensure также не имеет права
-// создать сиротский ключ, когда пара всё равно не может быть восстановлена.
+// The same split case (the certificate is valid, there is no key), but with no
+// token there is nothing to join again with — Ensure has to refuse clearly,
+// and the message has to name the file that is actually missing (the key)
+// rather than reason about the certificate, which is in fact in place. Ensure
+// also has no business creating an orphan key when the pair cannot be restored
+// anyway.
 func TestEnsureFailsWhenValidCertificateHasNoKeyAndNoToken(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
 	d := ensureDeps(t, dir, "control_plane")
 	writeFile(t, d.CAFile, ca.pem)
 	writeFile(t, d.CertFile, ca.leaf(t, time.Now().Add(time.Hour)))
-	// Ни ключа, ни токена.
+	// Neither a key nor a token.
 
 	err := Ensure(context.Background(), d)
 	if err == nil {
-		t.Fatal("валидный сертификат без ключа и без токена обязан провалить Ensure")
+		t.Fatal("a valid certificate with no key and no token has to fail Ensure")
 	}
 	if !strings.Contains(err.Error(), d.KeyFile) {
-		t.Fatalf("ошибка обязана называть отсутствующий файл ключа, получено: %v", err)
+		t.Fatalf("the error has to name the missing key file, got: %v", err)
 	}
 	if _, statErr := os.Stat(d.KeyFile); !os.IsNotExist(statErr) {
-		t.Fatal("Ensure не имеет права создать ключ, когда присоединиться заново нечем")
+		t.Fatal("Ensure has no business creating a key when there is nothing to join again with")
 	}
 }
 
@@ -283,7 +289,7 @@ func TestEnsureFailsWithoutCertificateAndWithoutToken(t *testing.T) {
 
 	err := Ensure(context.Background(), d)
 	if err == nil || !strings.Contains(err.Error(), "join-token") {
-		t.Fatalf("нет сертификата и нет токена — обязан быть внятный отказ, получено: %v", err)
+		t.Fatalf("no certificate and no token — there has to be a clear refusal, got: %v", err)
 	}
 }
 
@@ -296,40 +302,40 @@ func TestEnsureReportsExpiredDistinctlyFromAbsent(t *testing.T) {
 
 	err := Ensure(context.Background(), d)
 	if err == nil || !strings.Contains(err.Error(), "expired") {
-		t.Fatalf("просроченный сертификат без токена обязан назваться просроченным, получено: %v", err)
+		t.Fatalf("an expired certificate with no token has to be called expired, got: %v", err)
 	}
 }
 
-// Нечитаемый сертификат — не то же самое, что отсутствующий: под ним может
-// лежать валидное удостоверение. Ensure обязан отказаться сам и НЕ трогать
-// join, иначе он рискует сжечь единственный одноразовый токен на
-// присоединение, которое было не нужно. Каталог на месте файла сертификата
-// даёт ошибку чтения, которая не является os.ErrNotExist.
+// An unreadable certificate is not the same thing as an absent one: valid
+// credentials may be sitting under it. Ensure has to refuse by itself and NOT
+// touch join, otherwise it risks burning the one single-use token on a join
+// that was not needed. A directory in place of the certificate file produces a
+// read error that is not os.ErrNotExist.
 func TestEnsureFailsClosedWhenCertificateUnreadable(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
 	d := ensureDeps(t, dir, "control_plane")
 	writeFile(t, d.CAFile, ca.pem)
 	if err := os.Mkdir(d.CertFile, 0o755); err != nil {
-		t.Fatalf("каталог вместо файла сертификата: %v", err)
+		t.Fatalf("directory in place of the certificate file: %v", err)
 	}
-	writeFile(t, d.JoinTokenFile, []byte("не-трогать"))
+	writeFile(t, d.JoinTokenFile, []byte("do-not-touch"))
 
 	err := Ensure(context.Background(), d)
 	if err == nil {
-		t.Fatal("нечитаемый сертификат обязан провалить Ensure, а не тихо запустить join")
+		t.Fatal("an unreadable certificate has to fail Ensure, not quietly start a join")
 	}
 	if strings.Contains(err.Error(), "join-token") {
-		t.Fatalf("ошибка не имеет права звучать как отсутствие токена, получено: %v", err)
+		t.Fatalf("the error has no business sounding like a missing token, got: %v", err)
 	}
 	if _, statErr := os.Stat(d.JoinTokenFile); statErr != nil {
-		t.Fatal("токен не имеет права быть тронутым, пока Join не вызывался")
+		t.Fatal("the token has no business being touched while Join was never called")
 	}
 }
 
 func writeFile(t *testing.T, path string, body []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, body, 0o600); err != nil {
-		t.Fatalf("запись %s: %v", path, err)
+		t.Fatalf("writing %s: %v", path, err)
 	}
 }

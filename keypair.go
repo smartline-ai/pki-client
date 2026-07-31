@@ -10,49 +10,50 @@ import (
 	"os"
 )
 
-// LoadOrCreateKey возвращает существующий ключ или создаёт новый.
+// LoadOrCreateKey returns the existing key or creates a new one.
 //
-// Переиспользование существующего — не оптимизация, а условие корректности
-// пути повтора: если нода умерла между тем, как CP погасил токен, и тем, как
-// она записала сертификат, вторая попытка обязана предъявить тот же
-// публичный ключ. Иначе CP увидит чужой ключ на погашенном токене и откажет.
+// Reusing the existing one is not an optimisation, it is what makes the retry
+// path correct: if the node died between the moment the CP burned the token
+// and the moment it wrote the certificate, the second attempt has to present
+// the same public key. Otherwise the CP sees a foreign key against a burned
+// token and refuses.
 //
-// То же самое верно и внутри одного запуска: если два первых вызова
-// стартуют одновременно (гонка при холодном старте), оба пройдут проверку
-// "файла нет" и оба сгенерируют СВОИ ключи. На диск ляжет только один — но
-// без защиты ниже проигравший вернул бы вызывающему ключ, которого на диске
-// уже нет, и разошёлся бы с тем, что реально сохранено. CreateFileExclusive
-// гарантирует, что публикация на path происходит ровно один раз; проигравший
-// не сочиняет из этого свою ошибку, а читает то, что реально победило.
+// The same holds within a single run: if two first callers start at once (a
+// cold-start race), both pass the "no file" check and both generate THEIR OWN
+// keys. Only one of them lands on disk — but without the guard below the loser
+// would hand the caller a key that is no longer on disk, diverging from what
+// was actually stored. CreateFileExclusive guarantees that publishing to path
+// happens exactly once; the loser does not invent an error out of that, it
+// reads whatever actually won.
 func LoadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		return parseECKey(path, raw)
 	}
 	if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("pkiclient: чтение %s: %w", path, err)
+		return nil, fmt.Errorf("pkiclient: reading %s: %w", path, err)
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("pkiclient: генерация ключа: %w", err)
+		return nil, fmt.Errorf("pkiclient: generating key: %w", err)
 	}
 	der, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return nil, fmt.Errorf("pkiclient: сериализация ключа: %w", err)
+		return nil, fmt.Errorf("pkiclient: serialising key: %w", err)
 	}
 	body := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
 
 	if err := CreateFileExclusive(path, body, 0o600); err != nil {
 		if !os.IsExist(err) {
-			return nil, fmt.Errorf("pkiclient: сохранение ключа %s: %w", path, err)
+			return nil, fmt.Errorf("pkiclient: storing key %s: %w", path, err)
 		}
-		// Проиграли гонку: между нашим ReadFile и попыткой публикации кто-то
-		// другой уже создал path. Наш ключ выбрасывается целиком — он никогда
-		// не касался диска — и мы читаем то, что реально там оказалось.
+		// We lost the race: between our ReadFile and the publish attempt
+		// someone else created path. Our key is thrown away entirely — it
+		// never touched the disk — and we read what actually ended up there.
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("pkiclient: чтение %s после проигранной гонки за создание ключа: %w", path, err)
+			return nil, fmt.Errorf("pkiclient: reading %s after losing the race to create the key: %w", path, err)
 		}
 		return parseECKey(path, raw)
 	}
@@ -62,11 +63,11 @@ func LoadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
 func parseECKey(path string, raw []byte) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode(raw)
 	if block == nil {
-		return nil, fmt.Errorf("pkiclient: %s не содержит PEM-ключа", path)
+		return nil, fmt.Errorf("pkiclient: %s contains no PEM key", path)
 	}
 	key, err := x509.ParseECPrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("pkiclient: разбор ключа %s: %w", path, err)
+		return nil, fmt.Errorf("pkiclient: parsing key %s: %w", path, err)
 	}
 	return key, nil
 }

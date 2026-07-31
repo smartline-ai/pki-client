@@ -18,9 +18,9 @@ import (
 	"time"
 )
 
-// Рубеж считается от фактического срока листа, а не от конфига: участник не
-// знает TTL, которым CP его выписал, и обязан вывести его из
-// NotBefore/NotAfter.
+// The threshold is measured against the leaf's actual lifetime, not against
+// the config: a participant does not know the TTL the CP issued it with and
+// has to derive it from NotBefore/NotAfter.
 func TestNeedsRenewalUsesCertificateOwnLifetime(t *testing.T) {
 	issued := time.Now()
 	cert := &x509.Certificate{
@@ -32,23 +32,23 @@ func TestNeedsRenewalUsesCertificateOwnLifetime(t *testing.T) {
 		at   time.Time
 		want bool
 	}{
-		{"сразу после выпуска", issued, false},
-		{"на 59-й день", issued.Add(59 * 24 * time.Hour), false},
-		{"на 61-й день", issued.Add(61 * 24 * time.Hour), true},
-		{"после истечения", issued.Add(91 * 24 * time.Hour), true},
+		{"right after issuance", issued, false},
+		{"on day 59", issued.Add(59 * 24 * time.Hour), false},
+		{"on day 61", issued.Add(61 * 24 * time.Hour), true},
+		{"after expiry", issued.Add(91 * 24 * time.Hour), true},
 	}
 	for _, c := range cases {
 		if got := NeedsRenewal(cert, c.at); got != c.want {
-			t.Errorf("%s: NeedsRenewal = %v, ожидалось %v", c.name, got, c.want)
+			t.Errorf("%s: NeedsRenewal = %v, expected %v", c.name, got, c.want)
 		}
 	}
 	if !NeedsRenewal(nil, issued) {
-		t.Error("отсутствующий сертификат обязан требовать обновления")
+		t.Error("a missing certificate has to require renewal")
 	}
 }
 
-// Смысл источника: сервер, поднятый месяцы назад, обязан начать предъявлять
-// новый сертификат без перезапуска.
+// The point of the source: a server started months ago has to begin
+// presenting the new certificate without a restart.
 func TestCertSourceSwapsWithoutRestart(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
@@ -57,7 +57,7 @@ func TestCertSourceSwapsWithoutRestart(t *testing.T) {
 
 	key, err := LoadOrCreateKey(keyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 	writeFile(t, certPath, ca.leafFor(t, &key.PublicKey, time.Now().Add(time.Hour)))
 
@@ -72,22 +72,23 @@ func TestCertSourceSwapsWithoutRestart(t *testing.T) {
 
 	writeFile(t, certPath, ca.leafFor(t, &key.PublicKey, time.Now().Add(48*time.Hour)))
 	if err := src.Load(certPath, keyPath); err != nil {
-		t.Fatalf("повторный Load: %v", err)
+		t.Fatalf("second Load: %v", err)
 	}
 	second, _ := src.Get(&tls.ClientHelloInfo{})
 	if second == first {
-		t.Fatal("после перезагрузки источник обязан отдавать новый сертификат")
+		t.Fatal("after a reload the source has to hand out the new certificate")
 	}
 	if !second.Leaf.NotAfter.After(first.Leaf.NotAfter) {
-		t.Fatal("новый сертификат обязан быть свежее старого")
+		t.Fatal("the new certificate has to be fresher than the old one")
 	}
 }
 
-// Дополняет TestNeedsRenewalUsesCertificateOwnLifetime: тот тест целиком
-// строится на 90-дневном сертификате, поэтому реализация с зашитыми
-// константами 90/30 дней прошла бы его незамеченной. Здесь срок листа другой
-// (30 дней), и порог обязан пропорционально сдвинуться вместе с ним — иначе
-// проверяется не "своя треть срока", а совпадение с частным случаем теста.
+// Complements TestNeedsRenewalUsesCertificateOwnLifetime: that test is built
+// entirely on a 90-day certificate, so an implementation with hard-coded
+// 90/30-day constants would pass it unnoticed. Here the leaf's lifetime is
+// different (30 days) and the threshold has to move proportionally with it —
+// otherwise what is being checked is not "a third of its own lifetime" but a
+// coincidence with the test's special case.
 func TestNeedsRenewalScalesWithCertificatesOwnLifetime(t *testing.T) {
 	issued := time.Now()
 	cert := &x509.Certificate{
@@ -99,19 +100,19 @@ func TestNeedsRenewalScalesWithCertificatesOwnLifetime(t *testing.T) {
 		at   time.Time
 		want bool
 	}{
-		{"на 19-й день из 30 (до трети)", issued.Add(19 * 24 * time.Hour), false},
-		{"на 21-й день из 30 (после трети)", issued.Add(21 * 24 * time.Hour), true},
+		{"on day 19 of 30 (before the third)", issued.Add(19 * 24 * time.Hour), false},
+		{"on day 21 of 30 (after the third)", issued.Add(21 * 24 * time.Hour), true},
 	}
 	for _, c := range cases {
 		if got := NeedsRenewal(cert, c.at); got != c.want {
-			t.Errorf("%s: NeedsRenewal = %v, ожидалось %v", c.name, got, c.want)
+			t.Errorf("%s: NeedsRenewal = %v, expected %v", c.name, got, c.want)
 		}
 	}
 }
 
-// RunRenewal обязан реагировать на отмену контекста немедленно, а не только
-// по следующему тику: иначе остановка демона блокировалась бы до `every`,
-// здесь заведомо больше разумного таймаута теста.
+// RunRenewal has to react to context cancellation immediately rather than only
+// on the next tick: otherwise stopping the daemon would block for `every`,
+// deliberately longer here than any sensible test timeout.
 func TestRunRenewalReturnsPromptlyOnContextCancellation(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
@@ -120,7 +121,7 @@ func TestRunRenewalReturnsPromptlyOnContextCancellation(t *testing.T) {
 
 	key, err := LoadOrCreateKey(keyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 	writeFile(t, certPath, ca.leafFor(t, &key.PublicKey, time.Now().Add(24*time.Hour)))
 
@@ -132,9 +133,10 @@ func TestRunRenewalReturnsPromptlyOnContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		// Mode: control_plane — иначе тест проверял бы не отмену контекста
-		// внутри тикера, а ворота I2 (см. TestRunRenewalSkipsOutsideControlPlaneMode
-		// ниже), которые и без отмены возвращаются немедленно.
+		// Mode: control_plane — otherwise the test would be checking the I2
+		// gate (see TestRunRenewalSkipsOutsideControlPlaneMode below), which
+		// returns immediately even without a cancellation, rather than
+		// cancellation inside the ticker.
 		RunRenewal(ctx, Deps{
 			Mode: "control_plane",
 			Log:  discardLog(),
@@ -146,15 +148,16 @@ func TestRunRenewalReturnsPromptlyOnContextCancellation(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("RunRenewal не вернулся в течение секунды после отмены контекста при every=1h")
+		t.Fatal("RunRenewal did not return within a second of the context being cancelled with every=1h")
 	}
 }
 
-// I2 финального ревью: RunRenewal обязан молчать вне control_plane точно так
-// же, как Ensure/Join (ensure.go) — а не только «случайно» не срабатывать
-// благодаря тому, что сертификат dev-1 живёт 3650 дней. Тест ставит every=1h
-// и не отменяет контекст вовсе: если бы ворота были пропущены, RunRenewal
-// заблокировался бы на тикере и done не закрылся бы за отведённую секунду.
+// I2 of the final review: RunRenewal has to stay silent outside control_plane
+// exactly like Ensure/Join (ensure.go) — and not merely fail to fire "by
+// accident" thanks to dev-1's certificate living 3650 days. The test sets
+// every=1h and never cancels the context at all: had the gate been skipped,
+// RunRenewal would block on the ticker and done would not close within the
+// second it is given.
 func TestRunRenewalSkipsOutsideControlPlaneMode(t *testing.T) {
 	for _, mode := range []string{"webhook", "none", ""} {
 		t.Run(mode, func(t *testing.T) {
@@ -170,15 +173,16 @@ func TestRunRenewalSkipsOutsideControlPlaneMode(t *testing.T) {
 			select {
 			case <-done:
 			case <-time.After(time.Second):
-				t.Fatalf("RunRenewal(mode=%q) обязан вернуться немедленно, не дожидаясь тикера", mode)
+				t.Fatalf("RunRenewal(mode=%q) has to return immediately, without waiting for the ticker", mode)
 			}
 		})
 	}
 }
 
-// Смысл порядка "файл, потом указатель" (§ решения задачи) проверяется не
-// только по чтению кода: после успешного обновления диск и память обязаны
-// сходиться на одном и том же сертификате, а не на двух разных.
+// The point of the "file first, then the pointer" order (§ the task's
+// decisions) is checked by more than reading the code: after a successful
+// renewal, disk and memory have to agree on one and the same certificate
+// rather than on two different ones.
 func TestRenewOnceKeepsDiskAndMemoryInAgreement(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
@@ -189,7 +193,7 @@ func TestRenewOnceKeepsDiskAndMemoryInAgreement(t *testing.T) {
 
 	key, err := LoadOrCreateKey(keyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 	writeFile(t, certPath, ca.leafFor(t, &key.PublicKey, time.Now().Add(time.Hour)))
 
@@ -224,12 +228,12 @@ func TestRenewOnceKeepsDiskAndMemoryInAgreement(t *testing.T) {
 
 	onDisk, err := os.ReadFile(certPath)
 	if err != nil {
-		t.Fatalf("чтение файла: %v", err)
+		t.Fatalf("reading the file: %v", err)
 	}
 	block, _ := pem.Decode(onDisk)
 	diskCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		t.Fatalf("разбор файла: %v", err)
+		t.Fatalf("parsing the file: %v", err)
 	}
 
 	inMemory, err := src.Get(nil)
@@ -238,19 +242,19 @@ func TestRenewOnceKeepsDiskAndMemoryInAgreement(t *testing.T) {
 	}
 
 	if !diskCert.NotAfter.Equal(inMemory.Leaf.NotAfter) {
-		t.Fatalf("диск (%s) и память (%s) разошлись после обновления", diskCert.NotAfter, inMemory.Leaf.NotAfter)
+		t.Fatalf("disk (%s) and memory (%s) diverged after the renewal", diskCert.NotAfter, inMemory.Leaf.NotAfter)
 	}
 	if !inMemory.Leaf.NotAfter.After(time.Now().Add(47 * time.Hour)) {
-		t.Fatalf("in-memory сертификат не обновился: NotAfter=%s", inMemory.Leaf.NotAfter)
+		t.Fatalf("the in-memory certificate was not renewed: NotAfter=%s", inMemory.Leaf.NotAfter)
 	}
 }
 
-// I3 финального ревью: renewOnce проверял только цепочку до прижатого CA, но
-// не то, что выданный сертификат вообще выписан на ключ, который есть у
-// участника. Сертификат, честно собирающийся в цепочку и всё же выданный не
-// на тот ключ, раньше лёг бы на диск — и следующий рестарт нашёл бы ровно ту
-// расколотую пару, из которой C2 не даёт выбраться. Зеркало
-// TestJoinRejectsCertificateOnForeignKey (join_test.go) для пути обновления.
+// I3 of the final review: renewOnce checked only the chain to the pinned CA,
+// not whether the issued certificate was made out to a key the participant
+// actually has. A certificate that chains honestly and is nevertheless issued
+// for the wrong key used to land on disk — and the next restart would find
+// exactly the split pair C2 does not let you climb out of. The mirror of
+// TestJoinRejectsCertificateOnForeignKey (join_test.go) for the renewal path.
 func TestRenewOnceRejectsCertificateOnForeignKey(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
@@ -261,7 +265,7 @@ func TestRenewOnceRejectsCertificateOnForeignKey(t *testing.T) {
 
 	key, err := LoadOrCreateKey(keyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 	staleCert := ca.leafFor(t, &key.PublicKey, time.Now().Add(time.Hour))
 	writeFile(t, certPath, staleCert)
@@ -277,10 +281,10 @@ func TestRenewOnceRejectsCertificateOnForeignKey(t *testing.T) {
 
 	foreignKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("чужой ключ: %v", err)
+		t.Fatalf("foreign key: %v", err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Верный CA (ca), но подписан на ключ, которого у участника нет.
+		// The right CA (ca), but signed for a key the participant does not have.
 		leaf := ca.leafFor(t, &foreignKey.PublicKey, time.Now().Add(48*time.Hour))
 		json.NewEncoder(w).Encode(map[string]string{"cert_pem": string(leaf)})
 	}))
@@ -300,21 +304,21 @@ func TestRenewOnceRejectsCertificateOnForeignKey(t *testing.T) {
 	}
 
 	if err := renewOnce(context.Background(), d, &src); err == nil {
-		t.Fatal("сертификат, выданный на чужой ключ, обязан быть отвергнут")
+		t.Fatal("a certificate issued for a foreign key has to be rejected")
 	}
 
 	onDisk, err := os.ReadFile(certPath)
 	if err != nil {
-		t.Fatalf("чтение файла: %v", err)
+		t.Fatalf("reading the file: %v", err)
 	}
 	if string(onDisk) != string(staleCert) {
-		t.Fatal("отвергнутый сертификат не имеет права лечь на диск поверх старого")
+		t.Fatal("a rejected certificate has no business landing on disk over the old one")
 	}
 	after, err := src.Get(nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if after != before {
-		t.Fatal("отвергнутый сертификат не имеет права заменить указатель в памяти")
+		t.Fatal("a rejected certificate has no business replacing the pointer in memory")
 	}
 }

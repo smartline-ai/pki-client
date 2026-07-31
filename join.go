@@ -20,9 +20,9 @@ import (
 	"time"
 )
 
-// ErrJoinRejected — отказ, который не станет успехом от повторов: неверный
-// токен, кривой CSR, чужой CN.
-var ErrJoinRejected = errors.New("pkiclient: Control Plane отклонил присоединение")
+// ErrJoinRejected is a refusal that retries will not turn into a success: a
+// wrong token, a malformed CSR, a foreign CN.
+var ErrJoinRejected = errors.New("pkiclient: Control Plane rejected the join")
 
 const (
 	joinTimeout     = 10 * time.Minute
@@ -30,14 +30,14 @@ const (
 	joinHTTPTimeout = 30 * time.Second
 )
 
-// Params — все входные данные для одного join.
+// Params is all the input for a single join.
 //
-// Раньше здесь лежали NodeID/Region/AgentVersion/Addresses/Capacity — поля,
-// осмысленные только для вида node. Теперь то, что уходит в CSR (CN, IP),
-// несёт Identity, а всё остальное, что имеет смысл лишь для конкретного
-// вида, — Extra: она разворачивается в те же ключи верхнего уровня тела
-// запроса, какими были region/addresses/capacity/agent_version до
-// обобщения.
+// This used to hold NodeID/Region/AgentVersion/Addresses/Capacity — fields
+// that only make sense for kind node. Now what goes into the CSR (CN, IP) is
+// carried by Identity, and everything else that only makes sense for one
+// specific kind lives in Extra: it is expanded into the same top-level body
+// keys that region/addresses/capacity/agent_version used before the
+// generalisation.
 type Params struct {
 	URL       string
 	Token     string
@@ -47,33 +47,33 @@ type Params struct {
 	KeyPath   string
 	CAPEM     []byte
 	Roots     *x509.CertPool
-	// Extra — полезная нагрузка, осмысленная только для вида node: region,
-	// capacity, addresses, agent_version. Пустая карта для service и client.
+	// Extra is the payload that only makes sense for kind node: region,
+	// capacity, addresses, agent_version. An empty map for service and client.
 	Extra map[string]any
-	// Backoff — начальная пауза между попытками. Ноль означает секунду; в
-	// тестах ставится в миллисекунды, чтобы не ждать по-настоящему.
+	// Backoff is the initial pause between attempts. Zero means one second; in
+	// tests it is set to milliseconds so nothing actually waits.
 	Backoff time.Duration
 }
 
-// joinRequest — тело POST /v1/principals/join.
+// joinRequest is the body of POST /v1/principals/join.
 type joinRequest struct {
 	JoinToken string
 	Kind      string
 	CN        string
 	CSRPEM    string
-	// NodeID сохранён для вида node: старая ручка /v1/nodes/join читает
-	// именно его, и она остаётся живой на весь период переключения (план
-	// 02, задача 5; control-plane/internal/api/joinrouter.go). Для
-	// service/client не заполняется.
+	// NodeID is kept for kind node: the old /v1/nodes/join endpoint reads
+	// exactly this, and it stays alive for the whole switchover period (plan
+	// 02, task 5; control-plane/internal/api/joinrouter.go). Not filled in for
+	// service/client.
 	NodeID string
 	Extra  map[string]any
 }
 
-// MarshalJSON собирает join_token/kind/cn/csr_pem[/node_id] и разворачивает
-// Extra в те же ключи верхнего уровня. Так тело join для вида node остаётся
-// байт-в-байт тем же, что было до обобщения — node_id, addresses.private_ip,
-// capacity, region, agent_version, — а у service/client лишних полей просто
-// нет, потому что их Extra пуст.
+// MarshalJSON assembles join_token/kind/cn/csr_pem[/node_id] and expands Extra
+// into the same top-level keys. That keeps the join body for kind node
+// byte-for-byte what it was before the generalisation — node_id,
+// addresses.private_ip, capacity, region, agent_version — while service/client
+// simply have no extra fields, because their Extra is empty.
 func (r joinRequest) MarshalJSON() ([]byte, error) {
 	m := make(map[string]any, len(r.Extra)+5)
 	for k, v := range r.Extra {
@@ -94,8 +94,8 @@ type joinResponse struct {
 	CAPEM   string `json:"ca_pem"`
 }
 
-// Join выполняет присоединение целиком: ключ уже на диске (его положил
-// вызывающий), отсюда уходит CSR и сюда возвращается сертификат.
+// Join performs the whole join: the key is already on disk (the caller put it
+// there), the CSR leaves from here and the certificate comes back here.
 func Join(ctx context.Context, p Params, log *slog.Logger) error {
 	key, err := LoadOrCreateKey(p.KeyPath)
 	if err != nil {
@@ -114,8 +114,8 @@ func Join(ctx context.Context, p Params, log *slog.Logger) error {
 		}},
 	}
 
-	// node_id заполняется только для вида node: старая ручка читает именно
-	// его, а CN для этого вида и есть node_id (design §11).
+	// node_id is filled in only for kind node: the old endpoint reads exactly
+	// that, and for this kind the CN is the node_id (design §11).
 	var nodeID string
 	if p.Identity.Kind == KindNode {
 		nodeID = p.Identity.CN
@@ -125,7 +125,7 @@ func Join(ctx context.Context, p Params, log *slog.Logger) error {
 		CSRPEM: string(csrPEM), NodeID: nodeID, Extra: p.Extra,
 	})
 	if err != nil {
-		return fmt.Errorf("pkiclient: сборка тела join: %w", err)
+		return fmt.Errorf("pkiclient: assembling join body: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, joinTimeout)
@@ -144,15 +144,15 @@ func Join(ctx context.Context, p Params, log *slog.Logger) error {
 			return err
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("pkiclient: join не удался за %s: %w", joinTimeout, err)
+			return fmt.Errorf("pkiclient: join did not succeed within %s: %w", joinTimeout, err)
 		}
 		wait := time.Duration(math.Min(
 			float64(backoff)*math.Pow(2, float64(attempt)),
 			float64(joinBackoffCap)))
-		log.Warn("join не удался, повтор", "attempt", attempt+1, "wait", wait, "error", err)
+		log.Warn("join failed, retrying", "attempt", attempt+1, "wait", wait, "error", err)
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("pkiclient: join не удался за %s: %w", joinTimeout, err)
+			return fmt.Errorf("pkiclient: join did not succeed within %s: %w", joinTimeout, err)
 		case <-time.After(wait):
 		}
 	}
@@ -161,37 +161,37 @@ func Join(ctx context.Context, p Params, log *slog.Logger) error {
 func postJoin(ctx context.Context, hc *http.Client, url string, body []byte) (*joinResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("pkiclient: запрос join: %w", err)
+		return nil, fmt.Errorf("pkiclient: join request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("pkiclient: обращение к %s: %w", url, err)
+		return nil, fmt.Errorf("pkiclient: calling %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusOK:
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
-		// Тело не цитируется: в нём нет ничего, чего нет в коде, а токен в
-		// журнале не нужен.
+		// The body is not quoted: there is nothing in it that is not in the
+		// code, and the token has no business being in the log.
 		return nil, fmt.Errorf("%w: HTTP %d", ErrJoinRejected, resp.StatusCode)
 	default:
-		return nil, fmt.Errorf("pkiclient: Control Plane ответил HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("pkiclient: Control Plane answered HTTP %d", resp.StatusCode)
 	}
 
 	var out joinResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("pkiclient: ответ join не разбирается: %w", err)
+		return nil, fmt.Errorf("pkiclient: join response does not parse: %w", err)
 	}
 	if out.CertPEM == "" {
-		return nil, fmt.Errorf("pkiclient: ответ join без cert_pem")
+		return nil, fmt.Errorf("pkiclient: join response without cert_pem")
 	}
 	return &out, nil
 }
 
-// installCert проверяет выданный сертификат до того, как он ляжет на диск.
+// installCert verifies the issued certificate before it lands on disk.
 func installCert(p Params, key *ecdsa.PrivateKey, resp *joinResponse, log *slog.Logger) error {
 	cert, err := verifyIssuedCert(resp.CertPEM, key, p.Roots, p.Identity.Kind)
 	if err != nil {
@@ -201,59 +201,61 @@ func installCert(p Params, key *ecdsa.PrivateKey, resp *joinResponse, log *slog.
 	if err := WriteFileAtomic(p.CertPath, []byte(resp.CertPEM), 0o644); err != nil {
 		return err
 	}
-	// Токен удаляется только теперь: до этой точки повтор ещё имеет смысл.
+	// The token is deleted only now: up to this point a retry still makes
+	// sense.
 	if p.TokenPath != "" {
 		if err := os.Remove(p.TokenPath); err != nil && !os.IsNotExist(err) {
-			log.Warn("файл токена не удалён", "path", p.TokenPath, "error", err)
+			log.Warn("token file was not deleted", "path", p.TokenPath, "error", err)
 		}
 	}
-	log.Info("участник присоединился", "kind", string(p.Identity.Kind), "cn", p.Identity.CN, "not_after", cert.NotAfter)
+	log.Info("participant joined", "kind", string(p.Identity.Kind), "cn", p.Identity.CN, "not_after", cert.NotAfter)
 	return nil
 }
 
-// verifyIssuedCert разбирает и проверяет сертификат, пришедший от Control
-// Plane, до того как он коснётся диска. Общая для join (installCert) и
-// renew (renewOnce): до одного из предыдущих ревью копии успели разойтись —
-// у renew не было проверки публичного ключа вовсе, и это позволяло
-// сертификату, выданному не на тот ключ, лечь на диск, оставив узел в
-// состоянии расколотой пары.
+// verifyIssuedCert parses and verifies the certificate that came back from the
+// Control Plane, before it touches the disk. Shared by join (installCert) and
+// renew (renewOnce): before one of the earlier reviews the two copies had
+// drifted apart — renew had no public-key check at all, which let a
+// certificate issued for the wrong key land on disk and leave the node with a
+// split pair.
 //
-// Проверок две, и обе обязательны: цепочка к прижатому CA — против
-// подменённого Control Plane, совпадение публичного ключа — против
-// сертификата, к которому у нас нет приватного ключа.
+// There are two checks and both are mandatory: the chain to the pinned CA —
+// against a substituted Control Plane, and the public-key match — against a
+// certificate we have no private key for.
 //
-// kind выбирает ожидаемый EKU через expectedKeyUsage (certstate.go): Control
-// Plane выдаёт клиентский лист с одним лишь clientAuth (никогда serverAuth),
-// и до этого параметра здесь безусловно требовался serverAuth — сам join
-// клиента отваливался бы на собственной проверке присланного сертификата,
-// ни разу не поставив сертификат под сомнение по существу.
+// kind selects the expected EKU via expectedKeyUsage (certstate.go): the
+// Control Plane issues a client leaf with clientAuth alone (never serverAuth),
+// and before that parameter existed serverAuth was required here
+// unconditionally — a real client join would have fallen over on its own check
+// of the certificate it was sent, without once questioning the certificate on
+// the merits.
 func verifyIssuedCert(certPEM string, key *ecdsa.PrivateKey, roots *x509.CertPool, kind Kind) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("cert_pem не разбирается")
+		return nil, fmt.Errorf("cert_pem does not parse")
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("разбор выданного сертификата: %w", err)
+		return nil, fmt.Errorf("parsing the issued certificate: %w", err)
 	}
 	if _, err := cert.Verify(x509.VerifyOptions{
 		Roots:     roots,
 		KeyUsages: []x509.ExtKeyUsage{expectedKeyUsage(kind)},
 	}); err != nil {
-		return nil, fmt.Errorf("выданный сертификат не собирается в цепочку к прижатому CA: %w", err)
+		return nil, fmt.Errorf("the issued certificate does not chain to the pinned CA: %w", err)
 	}
 	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
 	if !ok || !pub.Equal(&key.PublicKey) {
-		return nil, fmt.Errorf("выдан сертификат на чужой ключ")
+		return nil, fmt.Errorf("the certificate was issued for a foreign key")
 	}
 	return cert, nil
 }
 
-// buildCSR собирает CSR для конкретного вида участника. CN — всегда id.CN;
-// IPAddresses выставляется только когда id.IP != nil. У client IP всегда
-// nil, и CSR остаётся без SAN IP вовсе — это то, что требует
-// control-plane/internal/pki.ValidateCSR для клиентского листа (пустой
-// IPAddresses, иначе отказ).
+// buildCSR assembles the CSR for a specific kind of participant. CN is always
+// id.CN; IPAddresses is set only when id.IP != nil. For client, IP is always
+// nil and the CSR is left with no SAN IP at all — which is what
+// control-plane/internal/pki.ValidateCSR requires for a client leaf (empty
+// IPAddresses, otherwise a refusal).
 func buildCSR(key *ecdsa.PrivateKey, id Identity) ([]byte, error) {
 	tmpl := &x509.CertificateRequest{
 		Subject:            pkix.Name{CommonName: id.CN},
@@ -265,7 +267,7 @@ func buildCSR(key *ecdsa.PrivateKey, id Identity) ([]byte, error) {
 	}
 	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
 	if err != nil {
-		return nil, fmt.Errorf("pkiclient: создание CSR: %w", err)
+		return nil, fmt.Errorf("pkiclient: creating CSR: %w", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), nil
 }

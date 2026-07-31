@@ -54,7 +54,7 @@ func (ca testCA) leaf(t *testing.T, notAfter time.Time) []byte {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
-		t.Fatalf("лист: %v", err)
+		t.Fatalf("leaf: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
@@ -71,14 +71,15 @@ func (ca testCA) leafFor(t *testing.T, pub *ecdsa.PublicKey, notAfter time.Time)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
 	if err != nil {
-		t.Fatalf("лист на заданный ключ: %v", err)
+		t.Fatalf("leaf for the given key: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-// clientLeafFor выпускает лист с ExtKeyUsage только clientAuth — форма, в
-// которой Control Plane реально выдаёт вид client (control-plane/internal/pki
-// .SignLeaf), в отличие от leaf()/leafFor() выше, которые несут serverAuth.
+// clientLeafFor issues a leaf with clientAuth as the only ExtKeyUsage — the
+// shape the Control Plane actually issues kind client in
+// (control-plane/internal/pki.SignLeaf), unlike leaf()/leafFor() above, which
+// carry serverAuth.
 func (ca testCA) clientLeafFor(t *testing.T, pub *ecdsa.PublicKey, notAfter time.Time) []byte {
 	t.Helper()
 	tmpl := &x509.Certificate{
@@ -91,7 +92,7 @@ func (ca testCA) clientLeafFor(t *testing.T, pub *ecdsa.PublicKey, notAfter time
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
 	if err != nil {
-		t.Fatalf("клиентский лист: %v", err)
+		t.Fatalf("client leaf: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
@@ -100,7 +101,7 @@ func (ca testCA) pool(t *testing.T) *x509.CertPool {
 	t.Helper()
 	p := x509.NewCertPool()
 	if !p.AppendCertsFromPEM(ca.pem) {
-		t.Fatal("CA не добавился в пул")
+		t.Fatal("the CA was not added to the pool")
 	}
 	return p
 }
@@ -114,7 +115,7 @@ func TestInspectClassifies(t *testing.T) {
 	write := func(name string, body []byte) string {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, body, 0o644); err != nil {
-			t.Fatalf("запись %s: %v", name, err)
+			t.Fatalf("writing %s: %v", name, err)
 		}
 		return p
 	}
@@ -124,79 +125,79 @@ func TestInspectClassifies(t *testing.T) {
 		path string
 		want CertState
 	}{
-		{"файла нет", filepath.Join(dir, "нет.pem"), CertAbsent},
-		{"не PEM", write("мусор.pem", []byte("не сертификат")), CertUnparseable},
-		{"просрочен", write("старый.pem", ours.leaf(t, now.Add(-time.Minute))), CertExpired},
-		{"чужой CA", write("чужой.pem", foreign.leaf(t, now.Add(time.Hour))), CertForeignCA},
-		{"валиден", write("хороший.pem", ours.leaf(t, now.Add(time.Hour))), CertValid},
+		{"no file", filepath.Join(dir, "missing.pem"), CertAbsent},
+		{"not PEM", write("garbage.pem", []byte("not a certificate")), CertUnparseable},
+		{"expired", write("old.pem", ours.leaf(t, now.Add(-time.Minute))), CertExpired},
+		{"foreign CA", write("foreign.pem", foreign.leaf(t, now.Add(time.Hour))), CertForeignCA},
+		{"valid", write("good.pem", ours.leaf(t, now.Add(time.Hour))), CertValid},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got, _, _ := Inspect(c.path, ours.pool(t), KindNode, now)
 			if got != c.want {
-				t.Fatalf("Inspect = %q, ожидалось %q", got, c.want)
+				t.Fatalf("Inspect = %q, expected %q", got, c.want)
 			}
 		})
 	}
 }
 
-// Присутствующий, но нечитаемый сертификат обязан отличаться от
-// отсутствующего: под ним может лежать валидное удостоверение, и функция,
-// ради которой существует Inspect, — не дать спутать эти два случая.
-// Каталог на месте файла сертификата — самый простой воспроизводимый способ
-// получить ошибку чтения, которая не является os.ErrNotExist.
+// A present but unreadable certificate has to differ from an absent one: valid
+// credentials may be sitting under it, and keeping those two cases apart is
+// the whole point of Inspect. A directory in place of the certificate file is
+// the simplest reproducible way to get a read error that is not
+// os.ErrNotExist.
 func TestInspectDistinguishesUnreadableFromAbsent(t *testing.T) {
 	ours := makeCA(t)
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "node.pem")
 	if err := os.Mkdir(certPath, 0o755); err != nil {
-		t.Fatalf("каталог вместо файла сертификата: %v", err)
+		t.Fatalf("directory in place of the certificate file: %v", err)
 	}
 
 	state, cert, err := Inspect(certPath, ours.pool(t), KindNode, time.Now())
 	if state != CertUnreadable {
-		t.Fatalf("Inspect = %q, ожидалось %q", state, CertUnreadable)
+		t.Fatalf("Inspect = %q, expected %q", state, CertUnreadable)
 	}
 	if cert != nil {
-		t.Fatal("нечитаемый сертификат не имеет права вернуть разобранный *x509.Certificate")
+		t.Fatal("an unreadable certificate has no business returning a parsed *x509.Certificate")
 	}
 	if err == nil {
-		t.Fatal("нечитаемый сертификат обязан вернуть исходную ошибку чтения")
+		t.Fatal("an unreadable certificate has to return the original read error")
 	}
 }
 
-// Переиспользование ключа — условие корректности пути повтора: вторая попытка
-// join обязана нести тот же публичный ключ, иначе CP её отвергнет.
+// Key reuse is what makes the retry path correct: the second join attempt has
+// to carry the same public key, otherwise the CP rejects it.
 func TestLoadOrCreateKeyReusesExisting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "node-key.pem")
 
 	first, err := LoadOrCreateKey(path)
 	if err != nil {
-		t.Fatalf("первый вызов: %v", err)
+		t.Fatalf("first call: %v", err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("файл ключа не создан: %v", err)
+		t.Fatalf("the key file was not created: %v", err)
 	}
 	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("режим ключа %v, ожидался 0600", info.Mode().Perm())
+		t.Fatalf("key mode is %v, expected 0600", info.Mode().Perm())
 	}
 
 	second, err := LoadOrCreateKey(path)
 	if err != nil {
-		t.Fatalf("второй вызов: %v", err)
+		t.Fatalf("second call: %v", err)
 	}
 	if !first.PublicKey.Equal(&second.PublicKey) {
-		t.Fatal("повторный вызов обязан вернуть тот же ключ, а не сгенерировать новый")
+		t.Fatal("a repeat call has to return the same key, not generate a new one")
 	}
 }
 
-// Два конкурентных первых вызова (холодный старт, гонка) обязаны сойтись на
-// одном ключе — том, что реально лежит на диске. Без атомарной публикации
-// "выиграл ровно один" каждый проигравший генерирует свой ключ и, в
-// зависимости от того, чья запись легла на диск последней, может вернуть
-// вызывающему ключ, отличный от сохранённого — а именно это переиспользование
-// ключа и обязано предотвращать (см. TestLoadOrCreateKeyReusesExisting).
+// Two concurrent first callers (cold start, a race) have to converge on one
+// key — the one that actually lies on disk. Without the atomic "exactly one
+// wins" publication every loser generates its own key and, depending on whose
+// write landed on disk last, may hand the caller a key different from the
+// stored one — which is exactly what key reuse has to prevent (see
+// TestLoadOrCreateKeyReusesExisting).
 func TestLoadOrCreateKeyConcurrentCallersConverge(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "node-key.pem")
 	const n = 32
@@ -216,35 +217,35 @@ func TestLoadOrCreateKeyConcurrentCallersConverge(t *testing.T) {
 			keys[i], errs[i] = LoadOrCreateKey(path)
 		}(i)
 	}
-	ready.Wait() // все горутины уже дошли до старта, прежде чем его открыть
+	ready.Wait() // every goroutine has reached the start line before we open it
 	start.Done()
-	done.Wait() // и до чтения keys/errs ниже все обязаны закончить свой вызов
+	done.Wait() // and all of them must finish their call before keys/errs are read below
 
-	// t.Fatalf в горутине — не по правилам testing.T, поэтому каждый вызов
-	// LoadOrCreateKey пишет свой результат в errs/keys, а падаем мы уже
-	// здесь, в теле теста, после того как все горутины завершились.
+	// t.Fatalf from a goroutine is against the rules of testing.T, so every
+	// LoadOrCreateKey call writes its result into errs/keys, and we fail here,
+	// in the test body, after all the goroutines have finished.
 	for i, err := range errs {
 		if err != nil {
-			t.Fatalf("вызов %d: %v", i, err)
+			t.Fatalf("call %d: %v", i, err)
 		}
 	}
 
 	onDisk, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("чтение итогового файла ключа: %v", err)
+		t.Fatalf("reading the resulting key file: %v", err)
 	}
 	block, _ := pem.Decode(onDisk)
 	if block == nil {
-		t.Fatal("итоговый файл ключа не PEM")
+		t.Fatal("the resulting key file is not PEM")
 	}
 	diskKey, err := x509.ParseECPrivateKey(block.Bytes)
 	if err != nil {
-		t.Fatalf("разбор итогового ключа на диске: %v", err)
+		t.Fatalf("parsing the resulting key on disk: %v", err)
 	}
 
 	for i, k := range keys {
 		if !k.PublicKey.Equal(&diskKey.PublicKey) {
-			t.Fatalf("вызов %d вернул ключ, отличный от того, что реально лежит на диске", i)
+			t.Fatalf("call %d returned a key different from the one that actually lies on disk", i)
 		}
 	}
 }

@@ -10,18 +10,18 @@ import (
 	"time"
 )
 
-// Deps — всё, что нужно для получения и поддержания сертификата, без единого
-// поля, специфичного для вида участника.
+// Deps is everything needed to obtain and maintain a certificate, without a
+// single field that is specific to a kind of participant.
 //
-// Раньше здесь лежал *config.Config исполнителя целиком, и это была
-// единственная причина, по которой пакет нельзя было использовать откуда-то
-// ещё. Явные поля вместо него: вызывающий сам решает, из какого своего
-// конфига их взять, и модуль не обязан знать форму ни одного из них.
+// This used to hold the executor's whole *config.Config, and that was the one
+// reason the package could not be used from anywhere else. Explicit fields
+// instead: the caller decides which of its own config to take them from, and
+// the module does not have to know the shape of any of them.
 type Deps struct {
-	// Mode — ворота. Join пропускается целиком, если это не "control_plane".
-	// Именно это защищает работающий демон от выкатки нового кода: бинарь
-	// приезжает, а сертификат не трогается, пока переключение не сделают
-	// намеренно.
+	// Mode is the gate. Join is skipped entirely unless this is
+	// "control_plane". This is exactly what protects a running daemon from a
+	// rollout of new code: the binary arrives, and the certificate is left
+	// alone until someone flips the switch deliberately.
 	Mode string
 
 	PKIURL        string
@@ -31,39 +31,40 @@ type Deps struct {
 	KeyFile       string
 
 	Identity Identity
-	// Extra — полезная нагрузка, осмысленная только для вида node: region,
-	// capacity, addresses, agent_version. Пустая карта для service и client.
-	// map[string]any, а не структура, потому что модуль не должен знать, что
-	// такое ёмкость исполнителя.
+	// Extra is the payload that only makes sense for kind node: region,
+	// capacity, addresses, agent_version. An empty map for service and client.
+	// A map[string]any rather than a struct, because the module has no business
+	// knowing what an executor's capacity is.
 	Extra map[string]any
 
 	Log *slog.Logger
 	Now func() time.Time
 }
 
-// Ensure приводит участника в состояние, где у него есть валидный
-// сертификат, либо внятно отказывается стартовать.
+// Ensure brings a participant to the state where it has a valid certificate,
+// or refuses to start with a clear reason.
 //
-// Вызывается ДО собственной валидации файлов вызывающего: та обычно жёстко
-// падает на отсутствующем сертификате, а отсутствующий сертификат — это
-// ровно тот случай, ради которого существует join.
+// It is called BEFORE the caller's own file validation: that validation
+// usually fails hard on a missing certificate, and a missing certificate is
+// precisely the case join exists for.
 func Ensure(ctx context.Context, d Deps) error {
-	// Режим — ворота (§3.2 контракта). В webhook join пропускается целиком,
-	// и это то, что защищает работающего участника от выкатки этого кода.
+	// Mode is the gate (§3.2 of the contract). In webhook mode join is skipped
+	// entirely, and that is what protects a running participant from a rollout
+	// of this code.
 	if d.Mode != "control_plane" {
-		d.Log.Info("join пропущен", "mode", d.Mode)
+		d.Log.Info("join skipped", "mode", d.Mode)
 		return nil
 	}
 
 	roots, caPEM, err := LoadRoots(d.CAFile)
 	if err != nil {
-		return fmt.Errorf("%w — прижатый ca.pem обязателен и при join, и при проверке своего сертификата", err)
+		return fmt.Errorf("%w — a pinned ca.pem is mandatory both for join and for verifying our own certificate", err)
 	}
 
-	// Общий вызов Join для обеих точек, откуда он может понадобиться ниже:
-	// обычного отсутствующего/непригодного сертификата и валидного
-	// сертификата без ключа. caPEM и roots захвачены из замыкания, чтобы не
-	// собирать Params дважды и не дать двум копиям разойтись.
+	// A shared Join call for both places below where it may be needed: the
+	// ordinary missing/unusable certificate, and a valid certificate with no
+	// key. caPEM and roots are captured from the closure so that Params is not
+	// assembled twice and two copies cannot drift apart.
 	joinNow := func(token string) error {
 		return Join(ctx, Params{
 			URL: d.PKIURL, Token: token,
@@ -79,63 +80,64 @@ func Ensure(ctx context.Context, d Deps) error {
 	token, tokenErr := readToken(d.JoinTokenFile)
 
 	if state == CertValid {
-		// Валиден сам по себе — не значит пригоден: TLS-хендшейк поднимается
-		// на паре, а не на одном файле. os.Stat здесь раньше проверял только
-		// то, что файл ключа существует — не то, что он образует пару
-		// именно с этим сертификатом. Расколотая пара (валидный сертификат +
-		// чужой или отсутствующий ключ) проходила эту проверку неотличимо от
-		// целой, и вызывающий падал на tls.LoadX509KeyPair уже после того,
-		// как собственная валидация файлов тоже пропустила пару, — без
-		// единого шанса на join, даже со свежим токеном рядом (C2 финального
-		// ревью). tls.LoadX509KeyPair — не оптимизация поверх os.Stat, это
-		// единственный способ узнать, что приватный ключ соответствует
-		// открытому ключу в сертификате.
+		// Valid on its own does not mean usable: a TLS handshake stands on a
+		// pair, not on one file. os.Stat here used to check only that the key
+		// file exists — not that it forms a pair with this particular
+		// certificate. A split pair (valid certificate + foreign or missing
+		// key) passed that check indistinguishably from an intact one, and the
+		// caller failed at tls.LoadX509KeyPair only after its own file
+		// validation had let the pair through as well — without a single
+		// chance at a join, even with a fresh token sitting right there (C2 of
+		// the final review). tls.LoadX509KeyPair is not an optimisation on top
+		// of os.Stat, it is the only way to learn that the private key matches
+		// the public key in the certificate.
 		if _, pairErr := tls.LoadX509KeyPair(d.CertFile, d.KeyFile); pairErr != nil {
 			if tokenErr != nil {
-				return fmt.Errorf("сертификат %s валиден, но не образует пару с ключом %s (%v), а join-token прочитать не удалось (%v): "+
-					"пара расколота, и присоединиться заново нечем", d.CertFile, d.KeyFile, pairErr, tokenErr)
+				return fmt.Errorf("certificate %s is valid but does not form a pair with key %s (%v), and the join-token could not be read (%v): "+
+					"the pair is split and there is nothing to join with again", d.CertFile, d.KeyFile, pairErr, tokenErr)
 			}
-			// LoadOrCreateKey внутри Join создаёт ключ только тогда, когда
-			// его нет на диске, и никогда не трогает существующий — так что
-			// звать Join здесь не может стереть ключ, от которого зависел бы
-			// этот сертификат: раз пара не сходится, зависеть было нечему
-			// (ключа нет вовсе, или он уже не тот, что подписан в
-			// сертификате). Join выпустит сертификат, согласованный с тем
-			// ключом, что реально лежит на диске (или создаст новый, если
-			// его нет), и перезапишет осиротевший сертификат.
-			d.Log.Warn("сертификат валиден, но не образует пару с ключом — присоединяемся заново",
+			// LoadOrCreateKey inside Join creates a key only when there is
+			// none on disk, and never touches an existing one — so calling
+			// Join here cannot wipe a key this certificate would depend on:
+			// since the pair does not match, there was nothing to depend on
+			// (either there is no key at all, or it is no longer the one
+			// signed into the certificate). Join will issue a certificate
+			// consistent with the key that actually lies on disk (or create a
+			// new one if there is none) and overwrite the orphaned
+			// certificate.
+			d.Log.Warn("certificate is valid but does not form a pair with the key — joining again",
 				"cert", d.CertFile, "key", d.KeyFile, "error", pairErr)
 			return joinNow(token)
 		}
 		if tokenErr == nil {
-			d.Log.Warn("рядом с валидным сертификатом лежит неиспользованный join-токен; он не удалён",
+			d.Log.Warn("an unused join token lies next to a valid certificate; it was not deleted",
 				"path", d.JoinTokenFile)
 		}
-		d.Log.Info("сертификат на месте, join не нужен", "not_after", cert.NotAfter)
+		d.Log.Info("certificate in place, no join needed", "not_after", cert.NotAfter)
 		return nil
 	}
 
-	// Файл на месте, но прочитать не вышло: под ним мог лежать валидный
-	// сертификат. Отказываемся сами, вместо того чтобы по ошибке принять
-	// это за CertAbsent и сжечь одноразовый токен на join, который вовсе не
-	// был нужен.
+	// The file is there but could not be read: valid credentials could have
+	// been sitting under it. We refuse by ourselves instead of mistaking this
+	// for CertAbsent and burning a single-use token on a join that was not
+	// needed at all.
 	if state == CertUnreadable {
-		return fmt.Errorf("сертификат %s есть на диске, но прочитать его не удалось: %w — "+
-			"join не запускается, чтобы не сжечь токен вслепую", d.CertFile, inspectErr)
+		return fmt.Errorf("certificate %s is on disk but could not be read: %w — "+
+			"join is not started, so a single-use token is not burned blindly", d.CertFile, inspectErr)
 	}
 
 	if tokenErr != nil {
-		return fmt.Errorf("сертификат в состоянии %q, а join-token прочитать не удалось (%v): "+
-			"присоединиться нечем", state, tokenErr)
+		return fmt.Errorf("certificate is in state %q and the join-token could not be read (%v): "+
+			"there is nothing to join with", state, tokenErr)
 	}
 
-	d.Log.Info("присоединяемся к Control Plane", "kind", string(d.Identity.Kind), "cert_state", string(state), "url", d.PKIURL)
+	d.Log.Info("joining the Control Plane", "kind", string(d.Identity.Kind), "cert_state", string(state), "url", d.PKIURL)
 	return joinNow(token)
 }
 
 func readToken(path string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("join_token_file не задан")
+		return "", fmt.Errorf("join_token_file is not set")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -143,7 +145,7 @@ func readToken(path string) (string, error) {
 	}
 	token := strings.TrimSpace(string(raw))
 	if token == "" {
-		return "", fmt.Errorf("%s пуст", path)
+		return "", fmt.Errorf("%s is empty", path)
 	}
 	return token, nil
 }

@@ -24,7 +24,7 @@ import (
 func joinParams(t *testing.T, ca testCA, url, dir string) Params {
 	t.Helper()
 	return Params{
-		URL: url, Token: "тестовый-токен",
+		URL: url, Token: "test-token",
 		Identity: Identity{
 			Kind: KindNode,
 			CN:   "n-01j9qk3m7x2v5tpb8w4h6n0zya",
@@ -50,22 +50,22 @@ func TestJoinWritesCertificateAndDeletesToken(t *testing.T) {
 	dir := t.TempDir()
 	p := joinParams(t, ca, "", dir)
 
-	// Ключ создаётся до запроса — сервер подпишет именно его.
+	// The key is created before the request — the server signs exactly it.
 	key, err := LoadOrCreateKey(p.KeyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Errorf("тело запроса не разбирается: %v", err)
+			t.Errorf("the request body does not parse: %v", err)
 		}
 		if req["node_id"] != "n-01j9qk3m7x2v5tpb8w4h6n0zya" {
 			t.Errorf("node_id = %v", req["node_id"])
 		}
-		if req["join_token"] != "тестовый-токен" {
-			t.Errorf("join_token не доехал")
+		if req["join_token"] != "test-token" {
+			t.Errorf("join_token did not arrive")
 		}
 		leaf := ca.leafFor(t, &key.PublicKey, time.Now().Add(time.Hour))
 		json.NewEncoder(w).Encode(map[string]string{
@@ -76,8 +76,8 @@ func TestJoinWritesCertificateAndDeletesToken(t *testing.T) {
 	p.URL = srv.URL
 
 	tokenPath := filepath.Join(dir, "join-token")
-	if err := os.WriteFile(tokenPath, []byte("тестовый-токен"), 0o600); err != nil {
-		t.Fatalf("токен: %v", err)
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0o600); err != nil {
+		t.Fatalf("token: %v", err)
 	}
 	p.TokenPath = tokenPath
 
@@ -87,32 +87,32 @@ func TestJoinWritesCertificateAndDeletesToken(t *testing.T) {
 
 	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindNode, time.Now())
 	if state != CertValid {
-		t.Fatalf("после join сертификат в состоянии %q", state)
+		t.Fatalf("after the join the certificate is in state %q", state)
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
-		t.Fatal("файл токена обязан быть удалён после успешного join")
+		t.Fatal("the token file has to be deleted after a successful join")
 	}
 }
 
-// Обобщение payload'а (план 03, задача 1, шаг 4): тело join для вида node
-// обязано остаться байт-в-байт тем же, что было до обобщения на kind/cn —
-// node_id, addresses.private_ip и capacity, — потому что executor-1 будет
-// говорить с CP, который тоже обслуживает старый маршрут /v1/nodes/join
-// (control-plane/internal/api/joinrouter.go), рассчитанный ровно на эту
-// форму тела.
+// Generalising the payload (plan 03, task 1, step 4): the join body for kind
+// node has to stay byte-for-byte what it was before the generalisation to
+// kind/cn — node_id, addresses.private_ip and capacity — because executor-1
+// will be talking to a CP that also serves the old /v1/nodes/join route
+// (control-plane/internal/api/joinrouter.go), which expects exactly that body
+// shape.
 func TestJoinRequestNodeWireFormatUnchanged(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
 	p := joinParams(t, ca, "", dir)
 	key, err := LoadOrCreateKey(p.KeyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 
 	var captured map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
-			t.Errorf("тело запроса не разбирается: %v", err)
+			t.Errorf("the request body does not parse: %v", err)
 			return
 		}
 		leaf := ca.leafFor(t, &key.PublicKey, time.Now().Add(time.Hour))
@@ -128,24 +128,24 @@ func TestJoinRequestNodeWireFormatUnchanged(t *testing.T) {
 	}
 
 	if captured["kind"] != "node" {
-		t.Fatalf("kind = %v, ожидалось \"node\"", captured["kind"])
+		t.Fatalf("kind = %v, expected \"node\"", captured["kind"])
 	}
 	if captured["cn"] != "n-01j9qk3m7x2v5tpb8w4h6n0zya" {
 		t.Fatalf("cn = %v", captured["cn"])
 	}
 	if captured["node_id"] != "n-01j9qk3m7x2v5tpb8w4h6n0zya" {
-		t.Fatalf("node_id = %v, ожидался прежний node_id", captured["node_id"])
+		t.Fatalf("node_id = %v, expected the previous node_id", captured["node_id"])
 	}
 	addresses, ok := captured["addresses"].(map[string]any)
 	if !ok {
-		t.Fatalf("addresses = %v, ожидался объект", captured["addresses"])
+		t.Fatalf("addresses = %v, expected an object", captured["addresses"])
 	}
 	if addresses["private_ip"] != "10.0.0.5" {
 		t.Fatalf("addresses.private_ip = %v", addresses["private_ip"])
 	}
 	capacity, ok := captured["capacity"].(map[string]any)
 	if !ok {
-		t.Fatalf("capacity = %v, ожидался объект", captured["capacity"])
+		t.Fatalf("capacity = %v, expected an object", captured["capacity"])
 	}
 	if capacity["cpu_millis"] != float64(2000) {
 		t.Fatalf("capacity.cpu_millis = %v", capacity["cpu_millis"])
@@ -158,23 +158,23 @@ func TestJoinRequestNodeWireFormatUnchanged(t *testing.T) {
 	}
 }
 
-// Шаг 5 плана: buildCSR собирает три разные формы CSR в зависимости от вида
-// участника. Node и service несут ровно один SAN IP — тот, что в Identity;
-// client не несёт SAN IP вовсе, что и требует
-// control-plane/internal/pki.ValidateCSR для клиентского листа.
+// Step 5 of the plan: buildCSR assembles three different CSR shapes depending
+// on the kind of participant. Node and service carry exactly one SAN IP — the
+// one in Identity; client carries no SAN IP at all, which is what
+// control-plane/internal/pki.ValidateCSR requires for a client leaf.
 func TestBuildCSRPerKind(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 
 	cases := []struct {
 		name string
 		id   Identity
 	}{
-		{"node несёт SAN IP", Identity{Kind: KindNode, CN: "n-01j9qk3m7x2v5tpb8w4h6n0zya", IP: net.ParseIP("10.0.0.5")}},
-		{"service несёт SAN IP", Identity{Kind: KindService, CN: "builder-1", IP: net.ParseIP("10.0.0.9")}},
-		{"client не несёт SAN IP", Identity{Kind: KindClient, CN: "ops-laptop", IP: nil}},
+		{"node carries a SAN IP", Identity{Kind: KindNode, CN: "n-01j9qk3m7x2v5tpb8w4h6n0zya", IP: net.ParseIP("10.0.0.5")}},
+		{"service carries a SAN IP", Identity{Kind: KindService, CN: "builder-1", IP: net.ParseIP("10.0.0.9")}},
+		{"client carries no SAN IP", Identity{Kind: KindClient, CN: "ops-laptop", IP: nil}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -184,39 +184,40 @@ func TestBuildCSRPerKind(t *testing.T) {
 			}
 			block, _ := pem.Decode(csrPEM)
 			if block == nil || block.Type != "CERTIFICATE REQUEST" {
-				t.Fatal("CSR не PEM")
+				t.Fatal("the CSR is not PEM")
 			}
 			csr, err := x509.ParseCertificateRequest(block.Bytes)
 			if err != nil {
-				t.Fatalf("разбор CSR: %v", err)
+				t.Fatalf("parsing the CSR: %v", err)
 			}
 			if err := csr.CheckSignature(); err != nil {
-				t.Fatalf("подпись CSR не сходится: %v", err)
+				t.Fatalf("the CSR signature does not check out: %v", err)
 			}
 			if csr.Subject.CommonName != c.id.CN {
-				t.Fatalf("CN = %q, ожидалось %q", csr.Subject.CommonName, c.id.CN)
+				t.Fatalf("CN = %q, expected %q", csr.Subject.CommonName, c.id.CN)
 			}
 			if c.id.IP != nil {
 				if len(csr.IPAddresses) != 1 || !csr.IPAddresses[0].Equal(c.id.IP) {
-					t.Fatalf("IPAddresses = %v, ожидался ровно [%v]", csr.IPAddresses, c.id.IP)
+					t.Fatalf("IPAddresses = %v, expected exactly [%v]", csr.IPAddresses, c.id.IP)
 				}
 			} else if len(csr.IPAddresses) != 0 {
-				t.Fatalf("IPAddresses = %v, client не имеет права нести SAN IP", csr.IPAddresses)
+				t.Fatalf("IPAddresses = %v, a client has no business carrying a SAN IP", csr.IPAddresses)
 			}
 		})
 	}
 }
 
-// Плана 03, задача 3, шаг 0 (блокирующая предпосылка): Control Plane выдаёт
-// клиентский лист только с clientAuth (control-plane/internal/pki.SignLeaf),
-// а verifyIssuedCert до этого теста требовал serverAuth безусловно — реальный
-// join вида client отваливался бы на проверке собственной же стороны, ни
-// разу не дойдя до вопроса, кому в действительности доверять.
+// Plan 03, task 3, step 0 (a blocking precondition): the Control Plane issues
+// a client leaf with clientAuth only (control-plane/internal/pki.SignLeaf),
+// while before this test verifyIssuedCert required serverAuth
+// unconditionally — a real join of kind client would have fallen over on its
+// own side's check, without once getting to the question of who to trust in
+// the first place.
 func TestJoinAcceptsClientAuthOnlyLeafForClientKind(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
 	p := Params{
-		Token:    "тестовый-токен",
+		Token:    "test-token",
 		Identity: Identity{Kind: KindClient, CN: "ops-laptop"},
 		CertPath: filepath.Join(dir, "client.pem"),
 		KeyPath:  filepath.Join(dir, "client-key.pem"),
@@ -225,7 +226,7 @@ func TestJoinAcceptsClientAuthOnlyLeafForClientKind(t *testing.T) {
 	}
 	key, err := LoadOrCreateKey(p.KeyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,25 +239,25 @@ func TestJoinAcceptsClientAuthOnlyLeafForClientKind(t *testing.T) {
 	p.URL = srv.URL
 
 	if err := Join(context.Background(), p, discardLog()); err != nil {
-		t.Fatalf("Join вида client с clientAuth-only листом обязан пройти: %v", err)
+		t.Fatalf("a join of kind client with a clientAuth-only leaf has to succeed: %v", err)
 	}
 
 	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindClient, time.Now())
 	if state != CertValid {
-		t.Fatalf("Inspect(kind=client) = %q, ожидалось %q", state, CertValid)
+		t.Fatalf("Inspect(kind=client) = %q, expected %q", state, CertValid)
 	}
 }
 
-// Тот же фикс не имеет права сломать node: лист node/service несёт оба EKU
-// (serverAuth+clientAuth), и join обязан по-прежнему проходить проверку на
-// serverAuth.
+// The same fix has no business breaking node: a node/service leaf carries both
+// EKUs (serverAuth+clientAuth), and join has to keep passing the serverAuth
+// check.
 func TestJoinStillAcceptsNodeLeaf(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
 	p := joinParams(t, ca, "", dir)
 	key, err := LoadOrCreateKey(p.KeyPath)
 	if err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -269,17 +270,18 @@ func TestJoinStillAcceptsNodeLeaf(t *testing.T) {
 	p.URL = srv.URL
 
 	if err := Join(context.Background(), p, discardLog()); err != nil {
-		t.Fatalf("Join вида node обязан пройти: %v", err)
+		t.Fatalf("a join of kind node has to succeed: %v", err)
 	}
 
 	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindNode, time.Now())
 	if state != CertValid {
-		t.Fatalf("Inspect(kind=node) = %q, ожидалось %q", state, CertValid)
+		t.Fatalf("Inspect(kind=node) = %q, expected %q", state, CertValid)
 	}
 }
 
-// 4xx фатален: отвергнутый токен не станет принятым от повторов, а демон,
-// который их делает, прячет ошибку провижининга за зелёным юнитом.
+// 4xx is fatal: a rejected token will not become an accepted one through
+// retries, and a daemon that keeps retrying hides a provisioning error behind
+// a green unit.
 func TestJoinFatalOn4xx(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
@@ -287,20 +289,20 @@ func TestJoinFatalOn4xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte(`{"error":{"code":"join_denied","message":"нет","details":{}}}`))
+		w.Write([]byte(`{"error":{"code":"join_denied","message":"no","details":{}}}`))
 	}))
 	defer srv.Close()
 
 	p := joinParams(t, ca, srv.URL, dir)
 	if _, err := LoadOrCreateKey(p.KeyPath); err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 	err := Join(context.Background(), p, discardLog())
 	if !errors.Is(err, ErrJoinRejected) {
-		t.Fatalf("err = %v, ожидалась ErrJoinRejected", err)
+		t.Fatalf("err = %v, expected ErrJoinRejected", err)
 	}
 	if calls.Load() != 1 {
-		t.Fatalf("сделано %d попыток, 4xx не должен повторяться", calls.Load())
+		t.Fatalf("%d attempts were made, a 4xx must not be retried", calls.Load())
 	}
 }
 
@@ -321,18 +323,19 @@ func TestJoinRetriesOn5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 	p.URL = srv.URL
-	p.Backoff = time.Millisecond // тест не должен ждать секундами
+	p.Backoff = time.Millisecond // the test must not wait around for seconds
 
 	if err := Join(context.Background(), p, discardLog()); err != nil {
 		t.Fatalf("Join: %v", err)
 	}
 	if calls.Load() != 3 {
-		t.Fatalf("попыток %d, ожидалось 3", calls.Load())
+		t.Fatalf("%d attempts, expected 3", calls.Load())
 	}
 }
 
-// Сертификат, не собирающийся в цепочку к прижатому CA, не имеет права лечь
-// на диск: иначе подменённый CP навязал бы участнику свою идентичность.
+// A certificate that does not chain to the pinned CA has no business landing
+// on disk: otherwise a substituted CP would foist its own identity on the
+// participant.
 func TestJoinRejectsCertificateFromForeignCA(t *testing.T) {
 	ours := makeCA(t)
 	foreign := makeCA(t)
@@ -348,32 +351,32 @@ func TestJoinRejectsCertificateFromForeignCA(t *testing.T) {
 	p.URL = srv.URL
 
 	if err := Join(context.Background(), p, discardLog()); err == nil {
-		t.Fatal("сертификат от чужого CA обязан быть отвергнут")
+		t.Fatal("a certificate from a foreign CA has to be rejected")
 	}
 	if _, err := os.Stat(p.CertPath); !os.IsNotExist(err) {
-		t.Fatal("отвергнутый сертификат не имеет права лечь на диск")
+		t.Fatal("a rejected certificate has no business landing on disk")
 	}
 }
 
-// Сертификат может честно собираться в цепочку к прижатому CA и всё равно
-// быть непригодным: если он выдан на чужой публичный ключ, у участника нет
-// приватного ключа к нему, и TLS-хендшейк никогда не поднимется. Эта ветка
-// installCert отдельная от проверки цепочки (TestJoinRejectsCertificateFromForeignCA).
+// A certificate can chain honestly to the pinned CA and still be unusable: if
+// it was issued for a foreign public key, the participant has no private key
+// for it and the TLS handshake will never come up. This branch of installCert
+// is separate from the chain check (TestJoinRejectsCertificateFromForeignCA).
 func TestJoinRejectsCertificateOnForeignKey(t *testing.T) {
 	ca := makeCA(t)
 	dir := t.TempDir()
 	p := joinParams(t, ca, "", dir)
 	if _, err := LoadOrCreateKey(p.KeyPath); err != nil {
-		t.Fatalf("ключ: %v", err)
+		t.Fatalf("key: %v", err)
 	}
 
 	foreignKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("чужой ключ: %v", err)
+		t.Fatalf("foreign key: %v", err)
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Верный CA (ca), но подписан на ключ, которого у участника нет.
+		// The right CA (ca), but signed for a key the participant does not have.
 		leaf := ca.leafFor(t, &foreignKey.PublicKey, time.Now().Add(time.Hour))
 		json.NewEncoder(w).Encode(map[string]string{"cert_pem": string(leaf), "ca_pem": string(ca.pem)})
 	}))
@@ -381,9 +384,9 @@ func TestJoinRejectsCertificateOnForeignKey(t *testing.T) {
 	p.URL = srv.URL
 
 	if err := Join(context.Background(), p, discardLog()); err == nil {
-		t.Fatal("сертификат, выданный на чужой ключ, обязан быть отвергнут")
+		t.Fatal("a certificate issued for a foreign key has to be rejected")
 	}
 	if _, err := os.Stat(p.CertPath); !os.IsNotExist(err) {
-		t.Fatal("отвергнутый сертификат не имеет права лечь на диск, даже если цепочка к CA верна")
+		t.Fatal("a rejected certificate has no business landing on disk, even if the chain to the CA is right")
 	}
 }
