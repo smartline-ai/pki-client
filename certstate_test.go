@@ -41,20 +41,35 @@ func makeCA(t *testing.T) testCA {
 	return testCA{cert: cert, key: key, pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})}
 }
 
+// leaf issues a node leaf on a key nobody has — every caller uses it to get a
+// certificate whose private key is deliberately missing or stale. clientAuth
+// alone, because that is what the Control Plane issues kind node since stage 2
+// (control-plane/internal/pki.SignLeaf); a fixture that carried serverAuth
+// would be testing a shape no CA hands out any more, and the tests standing on
+// it would keep passing while a real node was turned away.
 func (ca testCA) leaf(t *testing.T, notAfter time.Time) []byte {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	return ca.leafWithEKU(t, &key.PublicKey, notAfter, x509.ExtKeyUsageClientAuth)
+}
+
+// leafWithEKU issues a leaf for the given public key carrying exactly the given
+// extended key usages. The EKU set is the entire subject of the kind contract
+// (expectedKeyUsage, certstate.go), so a test about that contract has to be
+// able to state it outright instead of picking from a menu of pre-baked shapes.
+func (ca testCA) leafWithEKU(t *testing.T, pub *ecdsa.PublicKey, notAfter time.Time, eku ...x509.ExtKeyUsage) []byte {
+	t.Helper()
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: "n-01j9qk3m7x2v5tpb8w4h6n0zya"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  eku,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
 	if err != nil {
-		t.Fatalf("leaf: %v", err)
+		t.Fatalf("leaf with EKU %v: %v", eku, err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
@@ -134,6 +149,123 @@ func TestInspectClassifies(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got, _, _ := Inspect(c.path, ours.pool(t), KindNode, now)
+			if got != c.want {
+				t.Fatalf("Inspect = %q, expected %q", got, c.want)
+			}
+		})
+	}
+}
+
+// The EKU a leaf is verified against is one half of a contract pki-client
+// shares with control-plane/internal/pki.SignLeaf, and until this test nothing
+// in either repo checked that the two halves still agreed. Spelled out kind by
+// kind:
+//
+//	node    — clientAuth only, since stage 2: nothing dials a node any more, it
+//	          dials the Control Plane and long-polls.
+//	service — serverAuth: the edge proxy and the image builder are dialled by
+//	          address and genuinely serve TLS. The CP issues them
+//	          serverAuth+clientAuth, and Verify accepts on any one match.
+//	client  — clientAuth only, as it always was.
+//
+// While this was wrong for node, a fresh executor died after the Control Plane
+// had already redeemed its single-use token: the leaf came back, the node
+// refused its own certificate, nothing reached the disk, and every restart hit
+// a token that was already spent. Three modules' test suites had nothing to
+// say about it, because every node fixture in them carried serverAuth — a
+// shape the CA had stopped issuing.
+func TestExpectedKeyUsageMatchesTheIssuedLeaf(t *testing.T) {
+	ours := makeCA(t)
+	now := time.Now()
+
+	cases := []struct {
+		name  string
+		kind  Kind
+		eku   []x509.ExtKeyUsage
+		valid bool
+	}{
+		{"node, as the CP issues it: clientAuth only", KindNode, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, true},
+		{"node, the pre-stage-2 shape: serverAuth only", KindNode, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, false},
+		{"service, as the CP issues it: serverAuth+clientAuth", KindService, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, true},
+		{"service without serverAuth: it is the one kind that still serves TLS", KindService, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, false},
+		{"client, as the CP issues it: clientAuth only", KindClient, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, true},
+		{"client without clientAuth", KindClient, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatalf("key: %v", err)
+			}
+			leafPEM := ours.leafWithEKU(t, &key.PublicKey, now.Add(time.Hour), c.eku...)
+
+			// verifyIssuedCert is the gate on both the join and the renew path
+			// (join.go, renew.go): what it turns away never reaches disk at all.
+			_, err = verifyIssuedCert(string(leafPEM), key, ours.pool(t), c.kind)
+			switch {
+			case c.valid && err != nil:
+				t.Fatalf("verifyIssuedCert(kind=%s) turned away a leaf the CP issues for exactly that kind: %v", c.kind, err)
+			case !c.valid && err == nil:
+				t.Fatalf("verifyIssuedCert(kind=%s) accepted a leaf carrying %v", c.kind, c.eku)
+			}
+
+			// Inspect is the gate on every start after the first: a certificate
+			// that was good enough to join must not read as unusable on the next
+			// boot, or the participant joins again on a token that is gone.
+			path := filepath.Join(t.TempDir(), "leaf.pem")
+			if err := os.WriteFile(path, leafPEM, 0o644); err != nil {
+				t.Fatalf("writing %s: %v", path, err)
+			}
+			state, _, _ := Inspect(path, ours.pool(t), c.kind, now)
+			switch {
+			case c.valid && state != CertValid:
+				t.Fatalf("Inspect(kind=%s) = %q, expected %q", c.kind, state, CertValid)
+			case !c.valid && state == CertValid:
+				t.Fatalf("Inspect(kind=%s) called a leaf carrying %v valid", c.kind, c.eku)
+			}
+		})
+	}
+}
+
+// "Our CA signed this and the EKU is wrong" and "this is not our CA at all"
+// are the two failures Verify hands back through one and the same error, and
+// they send an operator to opposite ends of the fleet: the first is a version
+// skew between the CP and this module, fixed by a release; the second is a
+// substituted or stale root, fixed on the machine. Inspect keeps expired and
+// foreign_ca apart for exactly this reason, and wrong_eku earns the same
+// treatment — while it did not have it, every executor in the fleet reported a
+// CA problem it did not have.
+//
+// The last case is the one that makes the split worth checking: a certificate
+// that fails both ways has to keep reporting the chain, because a leaf from an
+// unknown CA is not made any more trustworthy by carrying the right EKU.
+func TestInspectSeparatesWrongEKUFromForeignCA(t *testing.T) {
+	ours := makeCA(t)
+	foreign := makeCA(t)
+	now := time.Now()
+
+	cases := []struct {
+		name string
+		ca   testCA
+		eku  x509.ExtKeyUsage
+		want CertState
+	}{
+		{"ours, the EKU node is verified against", ours, x509.ExtKeyUsageClientAuth, CertValid},
+		{"ours, the wrong EKU", ours, x509.ExtKeyUsageServerAuth, CertWrongEKU},
+		{"foreign, the right EKU", foreign, x509.ExtKeyUsageClientAuth, CertForeignCA},
+		{"foreign, the wrong EKU — the chain is the bigger question", foreign, x509.ExtKeyUsageServerAuth, CertForeignCA},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatalf("key: %v", err)
+			}
+			path := filepath.Join(t.TempDir(), "node.pem")
+			if err := os.WriteFile(path, c.ca.leafWithEKU(t, &key.PublicKey, now.Add(time.Hour), c.eku), 0o644); err != nil {
+				t.Fatalf("writing %s: %v", path, err)
+			}
+			got, _, _ := Inspect(path, ours.pool(t), KindNode, now)
 			if got != c.want {
 				t.Fatalf("Inspect = %q, expected %q", got, c.want)
 			}

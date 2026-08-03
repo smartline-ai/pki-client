@@ -25,8 +25,12 @@ import "net"
 type Kind string
 
 const (
-	// KindNode is an executor. Server + client leaf, SAN is the single
-	// RFC1918 address that comes into being on the node's own Volume.
+	// KindNode is an executor. A clientAuth-only leaf with no SAN at all: as of
+	// stage 2 nothing dials a node, it dials the Control Plane and long-polls
+	// for work, so there is no server role left for the certificate to carry
+	// and no address it could truthfully assert. Identical in shape to
+	// KindClient — the kind itself is what tells the two apart, stamped into
+	// the leaf by control-plane/internal/pki (leafkind.go).
 	KindNode Kind = "node"
 	// KindService is a daemon that listens but is not a node (a builder, for
 	// example). SAN is the address pinned into the token at issue time.
@@ -37,10 +41,14 @@ const (
 	KindClient Kind = "client"
 )
 
-// Identity is what goes into the CSR. CN is always present; IP is filled in
-// only for kinds that have a network address (node, service) and stays nil for
-// client — which is what makes buildCSR leave the SAN IP out of the template,
-// as control-plane/internal/pki.ValidateCSR requires for a client leaf.
+// Identity is what goes into the CSR. CN is always present; IP is filled in by
+// KindService alone and stays nil for node and client — which is what makes
+// buildCSR leave the SAN IP out of the template, as
+// control-plane/internal/pki.ValidateCSR now requires for both of them: a CSR
+// of either kind carrying a SAN IP is refused outright, whether it comes from
+// an agent that has not been updated or from one angling for a leaf fit for the
+// server role. Node used to fill this in; stage 2 removed the field it read
+// from along with the rest of address discovery.
 type Identity struct {
 	Kind Kind
 	CN   string

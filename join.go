@@ -224,11 +224,16 @@ func installCert(p Params, key *ecdsa.PrivateKey, resp *joinResponse, log *slog.
 // certificate we have no private key for.
 //
 // kind selects the expected EKU via expectedKeyUsage (certstate.go): the
-// Control Plane issues a client leaf with clientAuth alone (never serverAuth),
-// and before that parameter existed serverAuth was required here
-// unconditionally — a real client join would have fallen over on its own check
-// of the certificate it was sent, without once questioning the certificate on
-// the merits.
+// Control Plane issues node and client leaves with clientAuth alone (never
+// serverAuth), and a participant that requires the wrong one falls over on its
+// own check of the certificate it was just sent, without ever questioning that
+// certificate on the merits.
+//
+// That failure gets its own error, ErrWrongKeyUsage, rather than the chain
+// wording below (checkChain, certstate.go). It is the one refusal here that
+// says nothing about the certificate and everything about the two sides having
+// been released out of step, and the cost of folding it into "does not chain to
+// the pinned CA" was a fleet-wide outage diagnosed as a CA problem.
 func verifyIssuedCert(certPEM string, key *ecdsa.PrivateKey, roots *x509.CertPool, kind Kind) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil || block.Type != "CERTIFICATE" {
@@ -238,10 +243,12 @@ func verifyIssuedCert(certPEM string, key *ecdsa.PrivateKey, roots *x509.CertPoo
 	if err != nil {
 		return nil, fmt.Errorf("parsing the issued certificate: %w", err)
 	}
-	if _, err := cert.Verify(x509.VerifyOptions{
-		Roots:     roots,
-		KeyUsages: []x509.ExtKeyUsage{expectedKeyUsage(kind)},
-	}); err != nil {
+	// The zero time means "now" to crypto/x509, which is what a freshly issued
+	// certificate has to be judged against.
+	if err := checkChain(cert, roots, kind, time.Time{}); err != nil {
+		if errors.Is(err, ErrWrongKeyUsage) {
+			return nil, fmt.Errorf("the issued certificate is unusable: %w", err)
+		}
 		return nil, fmt.Errorf("the issued certificate does not chain to the pinned CA: %w", err)
 	}
 	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)

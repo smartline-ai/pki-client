@@ -35,9 +35,16 @@ assert:
 
 | Kind | Leaf | SAN |
 |---|---|---|
-| `node` | serverAuth + clientAuth | exactly one RFC1918 address |
+| `node` | clientAuth only | none |
 | `service` | serverAuth + clientAuth | exactly one address, pinned in the token when it was minted |
 | `client` | clientAuth only | none |
+
+`node` was `serverAuth + clientAuth` with an RFC1918 SAN until stage 2. Nothing
+dials a node any more — it dials the Control Plane and long-polls for work — so
+the leaf stopped asserting an address, and with it the assumption that a node
+*has* a stable one. A node may now be rented from any provider, sit behind NAT
+or change address mid-lease. `expectedKeyUsage` (certstate.go) has to agree with
+this table kind for kind; when it did not, no node could join at all.
 
 The `service` rule is the load-bearing one. It allows a **public** address —
 some machines have no private interface — but only the address the operator

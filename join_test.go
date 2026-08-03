@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -276,6 +277,109 @@ func TestJoinStillAcceptsNodeLeaf(t *testing.T) {
 	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindNode, time.Now())
 	if state != CertValid {
 		t.Fatalf("Inspect(kind=node) = %q, expected %q", state, CertValid)
+	}
+}
+
+// The whole defect, end to end and in the order it actually happened: the
+// Control Plane redeems the single-use token, inserts the node and answers with
+// the leaf it issues kind node since stage 2 — clientAuth and nothing else. If
+// the node refuses that leaf, the certificate never reaches disk while the
+// token is already spent server-side, so the restart systemd performs cannot
+// recover: the same token comes back as ErrJoinRejected, for ever.
+//
+// TestJoinStillAcceptsNodeLeaf above does not cover this: its fixture carries
+// serverAuth+clientAuth, which passes whichever EKU is expected. The shape that
+// distinguishes a right answer from a wrong one is the one the CA really signs.
+func TestJoinAcceptsClientAuthOnlyLeafForNodeKind(t *testing.T) {
+	ca := makeCA(t)
+	dir := t.TempDir()
+	p := joinParams(t, ca, "", dir)
+	key, err := LoadOrCreateKey(p.KeyPath)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaf := ca.leafWithEKU(t, &key.PublicKey, time.Now().Add(time.Hour), x509.ExtKeyUsageClientAuth)
+		json.NewEncoder(w).Encode(map[string]string{
+			"cert_pem": string(leaf), "ca_pem": string(ca.pem),
+		})
+	}))
+	defer srv.Close()
+	p.URL = srv.URL
+
+	tokenPath := filepath.Join(dir, "join-token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0o600); err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	p.TokenPath = tokenPath
+
+	if err := Join(context.Background(), p, discardLog()); err != nil {
+		t.Fatalf("a node join with the clientAuth-only leaf the CP issues has to succeed: %v", err)
+	}
+	if _, err := os.Stat(p.CertPath); err != nil {
+		t.Fatalf("the accepted certificate has to be on disk: %v", err)
+	}
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatal("the token file has to be deleted after a successful join")
+	}
+
+	// And the next boot has to agree, or the node joins again on a token that
+	// no longer exists.
+	state, _, _ := Inspect(p.CertPath, ca.pool(t), KindNode, time.Now())
+	if state != CertValid {
+		t.Fatalf("Inspect(kind=node) = %q, expected %q", state, CertValid)
+	}
+}
+
+// The message a node dies with is the whole of what the operator gets, and for
+// this failure it used to be "the issued certificate does not chain to the
+// pinned CA: x509: certificate specifies an incompatible key usage" — a
+// sentence whose loudest noun is the one thing that was never wrong. The CA had
+// signed the leaf itself, moments earlier, over a connection that certificate
+// verified.
+//
+// So the refusal has to be classifiable (ErrWrongKeyUsage) and has to say which
+// EKU was wanted and which arrived; and it must not say the certificate failed
+// to chain, because it did chain.
+func TestJoinNamesTheKeyUsageAndNotTheCA(t *testing.T) {
+	ca := makeCA(t)
+	dir := t.TempDir()
+	p := joinParams(t, ca, "", dir)
+	key, err := LoadOrCreateKey(p.KeyPath)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A leaf of the shape the CP issued before stage 2, answering a node
+		// that is verified against clientAuth: the version skew, exactly.
+		leaf := ca.leafWithEKU(t, &key.PublicKey, time.Now().Add(time.Hour), x509.ExtKeyUsageServerAuth)
+		json.NewEncoder(w).Encode(map[string]string{
+			"cert_pem": string(leaf), "ca_pem": string(ca.pem),
+		})
+	}))
+	defer srv.Close()
+	p.URL = srv.URL
+
+	err = Join(context.Background(), p, discardLog())
+	if err == nil {
+		t.Fatal("a leaf with an EKU this kind is not verified against has to be refused")
+	}
+	if !errors.Is(err, ErrWrongKeyUsage) {
+		t.Fatalf("err = %v, expected it to wrap ErrWrongKeyUsage", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"clientAuth", "serverAuth", string(KindNode)} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal has to name %q, got: %v", want, err)
+		}
+	}
+	if strings.Contains(msg, "chain") {
+		t.Errorf("the refusal must not blame the chain — the CA signed this leaf itself: %v", err)
+	}
+	if _, err := os.Stat(p.CertPath); !os.IsNotExist(err) {
+		t.Fatal("a refused certificate has no business landing on disk")
 	}
 }
 
