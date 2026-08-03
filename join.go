@@ -263,11 +263,28 @@ func verifyIssuedCert(certPEM string, key *ecdsa.PrivateKey, roots *x509.CertPoo
 // nil and the CSR is left with no SAN IP at all — which is what
 // control-plane/internal/pki.ValidateCSR requires for a client leaf (empty
 // IPAddresses, otherwise a refusal).
+//
+// DNSNames is set only for KindService, symmetrically with IPAddresses above:
+// KindService is the one kind whose leaf still carries a DNS name
+// (control-plane/internal/pki.SignLeaf puts p.CN into it), while node and
+// client leaves carry neither SAN kind at all as of stage 2. Until this fix
+// the CSR put id.CN into DNSNames unconditionally, so a node or client CSR
+// asked for a name its leaf would never receive — an asymmetry the final
+// review caught between this switch and ValidateCSR's.
+//
+// Not exploitable: SignLeaf never reads the CSR's DNSNames (or IPAddresses)
+// for node/client, it builds the leaf's SAN from p.Kind alone (ca.go), so no
+// leaf was ever issued carrying the stray name. Fixed anyway because the CSR
+// should not ask for what the leaf can never truthfully carry, and because
+// the two kind switches — this one and ValidateCSR's — read strangely if they
+// disagree without a comment explaining why it was safe to leave them so.
 func buildCSR(key *ecdsa.PrivateKey, id Identity) ([]byte, error) {
 	tmpl := &x509.CertificateRequest{
 		Subject:            pkix.Name{CommonName: id.CN},
-		DNSNames:           []string{id.CN},
 		SignatureAlgorithm: x509.ECDSAWithSHA256,
+	}
+	if id.Kind == KindService {
+		tmpl.DNSNames = []string{id.CN}
 	}
 	if id.IP != nil {
 		tmpl.IPAddresses = []net.IP{id.IP}
